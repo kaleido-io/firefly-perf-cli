@@ -39,5 +39,5 @@ func (pr *perfRunner) RunBlobPrivateMessage(nodeURL string, id int) {
 			"Content-Type": "application/json",
 		}).
 		SetBody([]byte(payload))
-	pr.sendAndWait(req, nodeURL, "messages/private", id, conf.PerfBlobBroadcast.String())
+	pr.sendAndWait(req, nodeURL, "messages/private", id, conf.PerfTestBlobPrivateMsg.String())
 }
