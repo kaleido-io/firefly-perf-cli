@@ -17,9 +17,6 @@ OLD_STACK_NAME=$1
 NEW_STACK_NAME=$2
 BLOCKCHAIN_PROVIDER=$3
 
-JOBS="msg_broadcast msg_private blob_broadcast blob_private"
-FLAGS=""
-
 # Kill existing ffperf processes
 printf "${PURPLE}Killing ffperf processes...\n${NC}"
 pkill -f 'ffperf'
@@ -58,25 +55,99 @@ cd $BASE_PATH
 
 printf ${PURPLE}"Deploying custom test contract...\n${NC}"
 
+cat <<EOF > $BASE_PATH/instances.yaml
+stackJSONPATH: ${HOME}/.firefly/stacks/$NEW_STACK_NAME/stack.json
+
+wsConfig:
+  wsPath: /ws
+  readBufferSize: 16000
+  writeBufferSize: 16000
+  initialDelay: 250ms
+  maximumDelay: 30s
+  initialConnectAttempts: 5
+
+instances:
+  - name: ff0-ff1-msg-broadcast
+    test: msg_broadcast
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    messageOptions:
+      longMessage: true
+  - name: ff0-ff1-msg-private
+    test: msg_private
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    messageOptions:
+      longMessage: true
+  - name: ff0-ff1-blob-broadcast
+    test: blob_broadcast
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    messageOptions:
+      longMessage: true
+  - name: ff0-ff1-blob-private
+    test: blob_private
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    messageOptions:
+      longMessage: true
+EOF
+
 if [ "$BLOCKCHAIN_PROVIDER" == "geth" ]; then
     output=$(ff deploy $NEW_STACK_NAME ./firefly/test/data/simplestorage/simple_storage.json | grep address)
     prefix='contract address: '
     CONTRACT_ADDRESS=${output#"$prefix"}
     FLAGS="$FLAGS -a $CONTRACT_ADDRESS"
     JOBS="$JOBS token_mint custom_ethereum_contract"
+    cat <<EOF >> $BASE_PATH/instances.yam
+  - name: ff1-ff2-mint
+    test: token_mint
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    tokenOptions:
+      tokenType: fungible
+  - name: ff1-ff2-contract
+    test: custom_ethereum_contract
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    contractOptions:
+      address: ${CONTRACT_ADDRESS}
+EOF
 fi
 
 if [ "$BLOCKCHAIN_PROVIDER" == "fabric" ]; then
     docker run --rm -v $BASE_PATH/firefly/test/data/assetcreator:/chaincode-go hyperledger/fabric-tools:2.4 peer lifecycle chaincode package /chaincode-go/package.tar.gz --path /chaincode-go --lang golang --label assetcreator
     output=$(ff deploy $NEW_STACK_NAME ./firefly/test/data/assetcreator/package.tar.gz firefly assetcreator 1.0)
-    FLAGS="$FLAGS --channel firefly --chaincode assetcreator"
-    JOBS="$JOBS custom_fabric_contract"
+    cat <<EOF >> $BASE_PATH/instances.yaml
+  - name: ff1-ff2-contract
+    test: custom_fabric_contract
+    length: 5m
+    recipient: ${ORG_IDENTITY}
+    recipientAddress: ${ORG_ADDRESS}
+    workers: 10
+    contractOptions:
+      channel: firefly
+      chaincode: assetcreator
+EOF
+
+
+EOF
 fi
 
-echo "FLAGS=$FLAGS"
-
-printf "${PURPLE}Modify the command below and run...\n${NC}"
-printf "${GREEN}nohup ffperf run-tests $JOBS -l 500h -r \"$ORG_IDENTITY\" -x \"$ORG_ADDRESS\" -w 100 -s ~/.firefly/stacks/$NEW_STACK_NAME/stack.json $FLAGS &> ffperf.log &${NC}\n"
+printf "${PURPLE}Modify $BASE_PATH/instances.yaml and the commnd below and run...\n${NC}"
+printf "${GREEN}nohup ffperf run -c $BASE_PATH/instances.yaml -n ff0-ff1-broadcast &> ffperf.log &${NC}\n"
 
 # Create markdown for Perf Test
 printf "\n${RED}*** Before Starting Test ***${NC}\n"

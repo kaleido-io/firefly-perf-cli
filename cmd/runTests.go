@@ -45,8 +45,8 @@ Executes the provided list of tests against a FireFly node to generate synthetic
 			WSPath:                 "/ws",
 			ReadBufferSize:         16000,
 			WriteBufferSize:        16000,
-			InitialDelay:           250000000,
-			MaximumDelay:           30000000000,
+			InitialDelay:           250 * time.Millisecond,
+			MaximumDelay:           30 * time.Second,
 			InitialConnectAttempts: 5,
 		}
 
@@ -130,7 +130,7 @@ func validateCommands(cmds []string) error {
 }
 
 func validateConfig(cfg conf.PerfRunnerConfig) error {
-	if cfg.TokenOptions.TokenType != fftypes.TokenTypeFungible.String() && cfg.TokenOptions.TokenType != fftypes.TokenTypeNonFungible.String() {
+	if cfg.TokenOptions.TokenType != "" && cfg.TokenOptions.TokenType != fftypes.TokenTypeFungible.String() && cfg.TokenOptions.TokenType != fftypes.TokenTypeNonFungible.String() {
 		return fmt.Errorf("invalid token type. Choose from [%s %s]", fftypes.TokenTypeFungible.String(), fftypes.TokenTypeNonFungible.String())
 	}
 	return nil

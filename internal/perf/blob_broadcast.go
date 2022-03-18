@@ -36,7 +36,7 @@ func (pr *perfRunner) RunBlobBroadcast(nodeURL string, id int) {
 			"Content-Type": "application/json",
 		}).
 		SetBody([]byte(payload))
-	pr.sendAndWait(req, nodeURL, "messages/broadcast", id, conf.PerfBlobBroadcast.String())
+	pr.sendAndWait(req, nodeURL, "messages/broadcast", id, conf.PerfTestBroadcast.String())
 }
 
 func (pr *perfRunner) generateBlob(length *big.Int) ([]byte, [32]byte) {
