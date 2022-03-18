@@ -1,3 +1,19 @@
+// Copyright © 2022 Kaleido, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package perf
 
 import (
@@ -34,7 +50,7 @@ type PerfRunner interface {
 
 type perfRunner struct {
 	bfr             chan int
-	cfg             *conf.PerfConfig
+	cfg             *conf.PerfRunnerConfig
 	client          *resty.Client
 	ctx             context.Context
 	endTime         int64
@@ -54,7 +70,7 @@ type SubscriptionInfo struct {
 	Job     fftypes.FFEnum
 }
 
-func New(config *conf.PerfConfig) PerfRunner {
+func New(config *conf.PerfRunnerConfig) PerfRunner {
 	poolName := fmt.Sprintf("pool-%s", fftypes.NewUUID())
 
 	// Create channel based dispatch for workers
@@ -102,7 +118,7 @@ func (pr *perfRunner) Init() (err error) {
 
 func (pr *perfRunner) Start() (err error) {
 	// Create token pool, if needed
-	if containsTargetCmd(pr.cfg.Cmds, conf.PerfCmdTokenMint) {
+	if containsTargetCmd(pr.cfg.Tests, conf.PerfTestTokenMint) {
 		err = pr.CreateTokenPool()
 		if err != nil {
 			return err
@@ -112,7 +128,7 @@ func (pr *perfRunner) Start() (err error) {
 	for _, nodeURL := range pr.nodeURLs {
 		// Create contract sub and listener, if needed
 		var listenerID string
-		if containsTargetCmd(pr.cfg.Cmds, conf.PerfCmdCustomEthereumContract) {
+		if containsTargetCmd(pr.cfg.Tests, conf.PerfTestCustomEthereumContract) {
 			listenerID, err = pr.createEthereumContractListener(nodeURL)
 			if err != nil {
 				return err
@@ -123,22 +139,23 @@ func (pr *perfRunner) Start() (err error) {
 			}
 			pr.subscriptionMap[subID] = SubscriptionInfo{
 				NodeURL: nodeURL,
-				Job:     conf.PerfCmdCustomEthereumContract,
+				Job:     conf.PerfTestCustomEthereumContract,
 			}
 		}
 
-		if containsTargetCmd(pr.cfg.Cmds, conf.PerfCmdCustomFabricContract) {
+		if containsTargetCmd(pr.cfg.Tests, conf.PerfTestCustomFabricContract) {
 			listenerID, err = pr.createFabricContractListener(nodeURL)
 			if err != nil {
 				return err
 			}
 			subID, err := pr.createContractsSub(nodeURL, listenerID)
+
 			if err != nil {
 				return err
 			}
 			pr.subscriptionMap[subID] = SubscriptionInfo{
 				NodeURL: nodeURL,
-				Job:     conf.PerfCmdCustomFabricContract,
+				Job:     conf.PerfTestCustomFabricContract,
 			}
 		}
 
@@ -149,7 +166,7 @@ func (pr *perfRunner) Start() (err error) {
 		}
 		pr.subscriptionMap[subID] = SubscriptionInfo{
 			NodeURL: nodeURL,
-			Job:     conf.PerfCmdBroadcast,
+			Job:     conf.PerfTestBroadcast,
 		}
 		// Create subscription for blob message confirmations
 		subID, err = pr.createMsgConfirmSub(nodeURL, fmt.Sprintf("blob_%s", pr.tagPrefix), fmt.Sprintf("^blob_%s_", pr.tagPrefix))
@@ -158,7 +175,7 @@ func (pr *perfRunner) Start() (err error) {
 		}
 		pr.subscriptionMap[subID] = SubscriptionInfo{
 			NodeURL: nodeURL,
-			Job:     conf.PerfBlobBroadcast,
+			Job:     conf.PerfTestBlobBroadcast,
 		}
 	}
 
@@ -172,22 +189,22 @@ func (pr *perfRunner) Start() (err error) {
 	}
 
 	for id := 0; id < pr.cfg.Workers; id++ {
-		ptr := id % len(pr.cfg.Cmds)
+		ptr := id % len(pr.cfg.Tests)
 
-		switch pr.cfg.Cmds[ptr] {
-		case conf.PerfCmdBroadcast:
+		switch pr.cfg.Tests[ptr] {
+		case conf.PerfTestBroadcast:
 			go pr.RunBroadcast(pr.client.BaseURL, id)
-		case conf.PerfCmdPrivateMsg:
+		case conf.PerfTestPrivateMsg:
 			go pr.RunPrivateMessage(pr.client.BaseURL, id)
-		case conf.PerfCmdTokenMint:
+		case conf.PerfTestTokenMint:
 			go pr.RunTokenMint(pr.client.BaseURL, id)
-		case conf.PerfCmdCustomEthereumContract:
+		case conf.PerfTestCustomEthereumContract:
 			go pr.RunCustomEthereumContract(pr.client.BaseURL, id)
-		case conf.PerfCmdCustomFabricContract:
+		case conf.PerfTestCustomFabricContract:
 			go pr.RunCustomFabricContract(pr.client.BaseURL, id)
-		case conf.PerfBlobBroadcast:
+		case conf.PerfTestBlobBroadcast:
 			go pr.RunBlobBroadcast(pr.client.BaseURL, id)
-		case conf.PerfBlobPrivateMsg:
+		case conf.PerfTestBlobPrivateMsg:
 			go pr.RunBlobPrivateMessage(pr.client.BaseURL, id)
 		}
 	}
@@ -253,7 +270,7 @@ func (pr *perfRunner) eventLoop(wsconn wsclient.WSClient) (err error) {
 					return fmt.Errorf("received an event on unknown subscription: %s", event.Subscription.ID)
 				}
 				switch subInfo.Job {
-				case conf.PerfBlobBroadcast, conf.PerfBlobPrivateMsg:
+				case conf.PerfTestBlobBroadcast, conf.PerfTestBlobPrivateMsg:
 					workerIDFromTag = strings.ReplaceAll(event.Message.Header.Tag, fmt.Sprintf("blob_%s_", pr.tagPrefix), "")
 				default:
 					workerIDFromTag = strings.ReplaceAll(event.Message.Header.Tag, pr.tagPrefix+"_", "")
@@ -268,7 +285,7 @@ func (pr *perfRunner) eventLoop(wsconn wsclient.WSClient) (err error) {
 
 				pr.deleteMsgTime(event.Message.Header.ID.String())
 				log.Infof("\n\t%d - Received \n\t%d --- Event ID: %s\n\t%d --- Message ID: %s\n\t%d --- Data ID: %s", workerID, workerID, event.ID.String(), workerID, event.Message.Header.ID.String(), workerID, event.Message.Data[0].ID)
-				if subInfo.Job == conf.PerfBlobBroadcast {
+				if subInfo.Job == conf.PerfTestBlobBroadcast {
 					pr.downloadAndVerifyBlob(subInfo.NodeURL, event.Message.Data[0].ID.String(), *event.Message.Data[0].Hash)
 				}
 			}
@@ -311,19 +328,19 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 			var contractRes fftypes.ContractCallResponse
 
 			switch action {
-			case conf.PerfCmdBroadcast.String(), conf.PerfCmdPrivateMsg.String():
+			case conf.PerfTestBroadcast.String(), conf.PerfTestPrivateMsg.String():
 				json.Unmarshal(res.Body(), &msgRes)
 				pr.updateMsgTime(msgRes.Header.ID.String())
 				log.Infof("%d --> %s Sent with Message ID: %s", id, action, msgRes.Header.ID)
-			case conf.PerfCmdTokenMint.String():
+			case conf.PerfTestTokenMint.String():
 				json.Unmarshal(res.Body(), &tokenRes)
 				pr.updateMsgTime(tokenRes.Message.String())
 				log.Infof("%d --> %s Sent with Token ID: %s", id, action, tokenRes.LocalID)
-			case conf.PerfCmdCustomEthereumContract.String(), conf.PerfCmdCustomFabricContract.String():
+			case conf.PerfTestCustomEthereumContract.String(), conf.PerfTestCustomFabricContract.String():
 				json.Unmarshal(res.Body(), &contractRes)
 				pr.updateMsgTime(strconv.Itoa(id))
 				log.Infof("%d --> Invoked contract: %s", id, contractRes.ID)
-			case conf.PerfBlobBroadcast.String(), conf.PerfBlobPrivateMsg.String():
+			case conf.PerfTestBlobBroadcast.String(), conf.PerfTestBlobPrivateMsg.String():
 				json.Unmarshal(res.Body(), &msgRes)
 				pr.updateMsgTime(msgRes.Header.ID.String())
 				log.Infof("%d --> Sent blob: %s", id, msgRes.Header.ID)
