@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -46,6 +48,7 @@ type PerfRunner interface {
 	// Tokens
 	CreateTokenPool() error
 	RunTokenMint(nodeURL string, id int)
+	IsDaemon() bool
 }
 
 type perfRunner struct {
@@ -63,6 +66,7 @@ type perfRunner struct {
 	wsUUID          fftypes.UUID
 	nodeURLs        []string
 	subscriptionMap map[string]SubscriptionInfo
+	daemon          bool
 }
 
 type SubscriptionInfo struct {
@@ -107,6 +111,7 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 		wsUUID:          wsUUID,
 		nodeURLs:        config.NodeURLs,
 		subscriptionMap: make(map[string]SubscriptionInfo),
+		daemon:          config.Daemon,
 	}
 }
 
@@ -209,14 +214,29 @@ func (pr *perfRunner) Start() (err error) {
 		}
 	}
 
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, os.Interrupt)
+	signal.Notify(signalCh, os.Kill)
+	signal.Notify(signalCh, syscall.SIGTERM)
+	signal.Notify(signalCh, syscall.SIGQUIT)
+	signal.Notify(signalCh, syscall.SIGKILL)
+
 	i := 0
 	lastCheckedTime := time.Now()
-	for time.Now().Unix() < pr.endTime {
-		pr.bfr <- i
-		i++
-		if time.Since(lastCheckedTime).Seconds() > 60 {
+
+perfLoop:
+	for pr.daemon || time.Now().Unix() < pr.endTime {
+		select {
+		case <-signalCh:
 			pr.getDelinquentMsgs()
-			lastCheckedTime = time.Now()
+			break perfLoop
+		case pr.bfr <- i:
+			i++
+			if time.Since(lastCheckedTime).Seconds() > 60 {
+				pr.getDelinquentMsgs()
+				lastCheckedTime = time.Now()
+			}
+			break
 		}
 	}
 
@@ -464,7 +484,7 @@ func (pr *perfRunner) getDelinquentMsgs() {
 	}
 
 	log.Warnf("Delinquent Messages:\n%s", string(dw))
-	if len(delinquentMsgs) > 0 && pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
+	if len(delinquentMsgs) > 0 && (pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() && !pr.daemon) {
 		os.Exit(1)
 	}
 }
@@ -601,4 +621,8 @@ func (pr *perfRunner) createContractsSub(nodeURL, listenerID string) (subID stri
 	log.Infof("Created contracts subscription on %s: %s", nodeURL, fmt.Sprintf("contracts_%s", pr.tagPrefix))
 
 	return sub.ID.String(), nil
+}
+
+func (pr *perfRunner) IsDaemon() bool {
+	return pr.daemon
 }
