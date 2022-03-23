@@ -99,8 +99,16 @@ Executes a instance within a performance test suite to generate synthetic load a
 			}
 			runnerConfig.NodeURLs = make([]string, len(stack.Members))
 			for i, member := range stack.Members {
-				// TODO dont hardcode to localhost
-				runnerConfig.NodeURLs[i] = fmt.Sprintf("http://localhost:%v", member.ExposedFireflyPort)
+				if member.FireflyHostname == "" {
+					member.FireflyHostname = "localhost"
+				}
+				scheme := "http"
+				if member.UseHTTPS {
+					scheme = "https"
+				}
+
+				// TODO support username / passwords ? ideally isn't embedded into the URL itself but set as a header
+				runnerConfig.NodeURLs[i] = fmt.Sprintf("%s://%s:%v", scheme, member.FireflyHostname, member.ExposedFireflyPort)
 			}
 		}
 
