@@ -51,12 +51,14 @@ type PerfRunnerConfig struct {
 	Workers          int
 	NodeURLs         []string
 	StackJSONPath    string
+	Daemon           bool
 }
 
 type PerformanceTestConfig struct {
 	StackJSONPath string           `json:"stackJSONPath" yaml:"stackJSONPath"`
 	Instances     []InstanceConfig `json:"instances" yaml:"instances"`
 	WSConfig      FireFlyWsConf    `json:"wsConfig,omitempty" yaml:"wsConfig,omitempty"`
+	Daemon        bool             `json:"daemon,omitempty" yaml:"daemon,omitempty"`
 }
 
 type InstanceConfig struct {

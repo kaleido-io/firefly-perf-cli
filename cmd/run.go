@@ -33,6 +33,7 @@ import (
 var configFilePath string
 var instanceName string
 var instanceIndex int
+var daemonOverride bool
 
 var perfRunner perf.PerfRunner
 
@@ -47,6 +48,10 @@ Executes a instance within a performance test suite to generate synthetic load a
 		config, err := loadPerfConfig(configFilePath)
 		if err != nil {
 			return err
+		}
+
+		if !config.Daemon {
+			config.Daemon = daemonOverride
 		}
 
 		if instanceName != "" && instanceIndex != -1 {
@@ -101,6 +106,12 @@ Executes a instance within a performance test suite to generate synthetic load a
 		if err != nil {
 			return err
 		}
+
+		if perfRunner.IsDaemon() {
+			go func() {
+				// TODO start a server process for readiness and metrics
+			}()
+		}
 		return perfRunner.Start()
 	},
 }
@@ -120,6 +131,7 @@ func init() {
 	runCmd.Flags().StringVarP(&configFilePath, "config", "c", "", "Path to performance config that describes the network and test instances")
 	runCmd.Flags().StringVarP(&instanceName, "instance-name", "n", "", "Instance within performance config to run against the network")
 	runCmd.Flags().IntVarP(&instanceIndex, "instance-idx", "i", -1, "Index of the instance within performance config to run against the network")
+	runCmd.Flags().BoolVarP(&daemonOverride, "daemon", "d", false, "Run in long-lived, daemon mode. Any provided test length is ignored.")
 
 	runCmd.MarkFlagRequired("config")
 }
@@ -166,6 +178,7 @@ func loadRunnerConfigFromInstance(instance *conf.InstanceConfig, perfConfig *con
 	runnerConfig.RecipientAddress = instance.RecipientAddress
 	runnerConfig.StackJSONPath = perfConfig.StackJSONPath
 	runnerConfig.WebSocket = perfConfig.WSConfig
+	runnerConfig.Daemon = perfConfig.Daemon
 
 	err := validateConfig(*runnerConfig)
 	if err != nil {
