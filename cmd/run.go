@@ -34,6 +34,7 @@ import (
 	"os/signal"
 	"path"
 	"syscall"
+	"time"
 )
 
 var configFilePath string
@@ -137,7 +138,6 @@ func loadPerfConfig(filename string) (*conf.PerformanceTestConfig, error) {
 	} else {
 		var config *conf.PerformanceTestConfig
 		var err error
-		log.Info(path.Ext(filename))
 		if path.Ext(filename) == ".yaml" {
 			err = yaml.Unmarshal(d, &config)
 		} else {
@@ -192,14 +192,13 @@ func runDaemonServer() {
 	}
 
 	mux.HandleFunc("/status", func(writer http.ResponseWriter, request *http.Request) {
-		defer request.Body.Close()
-
 		status := struct {
-			Up bool
+			Up bool `json:"up"`
 		}{Up: true}
 
-		decoder := json.NewDecoder(request.Body)
-		err := decoder.Decode(&status)
+		writer.Header().Set("Content-Type", "application/json")
+		encoder := json.NewEncoder(writer)
+		err := encoder.Encode(&status)
 		if err != nil {
 			log.Error(err)
 		}
@@ -218,18 +217,20 @@ func runDaemonServer() {
 		signal.Notify(signalCh, syscall.SIGKILL)
 
 		<-signalCh
-
+		log.Warnf("Received shutdown signal, shutting down webserver in 500ms")
+		time.Sleep(500 * time.Millisecond)
 		// We received an interrupt signal, shut down.
 		if err := srv.Shutdown(context.Background()); err != nil {
 			// Error from closing listeners, or context timeout:
-			log.Printf("HTTP server Shutdown: %v", err)
+			log.Errorf("HTTP server Shutdown: %v\n", err)
 		}
 		close(idleConnsClosed)
 	}()
 
+	log.Info("Starting daemon HTTP server")
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		// Error starting or closing listener:
-		log.Printf("HTTP server ListenAndServe: %v", err)
+		log.Errorf("HTTP server ListenAndServe: %v\n", err)
 	}
 
 	<-idleConnsClosed

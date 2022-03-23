@@ -223,17 +223,20 @@ func (pr *perfRunner) Start() (err error) {
 
 	i := 0
 	lastCheckedTime := time.Now()
+
+perfLoop:
 	for pr.daemon || time.Now().Unix() < pr.endTime {
 		select {
 		case <-signalCh:
 			pr.getDelinquentMsgs()
-			break
+			break perfLoop
 		case pr.bfr <- i:
 			i++
 			if time.Since(lastCheckedTime).Seconds() > 60 {
 				pr.getDelinquentMsgs()
 				lastCheckedTime = time.Now()
 			}
+			break
 		}
 	}
 
