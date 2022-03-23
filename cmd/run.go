@@ -17,17 +17,23 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/hyperledger/firefly-perf-cli/internal/conf"
 	"github.com/hyperledger/firefly-perf-cli/internal/perf"
 	"github.com/hyperledger/firefly/pkg/fftypes"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 	"io/ioutil"
+	"net/http"
+	"os"
+	"os/signal"
 	"path"
+	"syscall"
 )
 
 var configFilePath string
@@ -108,9 +114,7 @@ Executes a instance within a performance test suite to generate synthetic load a
 		}
 
 		if perfRunner.IsDaemon() {
-			go func() {
-				// TODO start a server process for readiness and metrics
-			}()
+			go runDaemonServer()
 		}
 		return perfRunner.Start()
 	},
@@ -119,15 +123,6 @@ Executes a instance within a performance test suite to generate synthetic load a
 func init() {
 	rootCmd.AddCommand(runCmd)
 
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// runCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// runCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	runCmd.Flags().StringVarP(&configFilePath, "config", "c", "", "Path to performance config that describes the network and test instances")
 	runCmd.Flags().StringVarP(&instanceName, "instance-name", "n", "", "Instance within performance config to run against the network")
 	runCmd.Flags().IntVarP(&instanceIndex, "instance-idx", "i", -1, "Index of the instance within performance config to run against the network")
@@ -186,4 +181,56 @@ func loadRunnerConfigFromInstance(instance *conf.InstanceConfig, perfConfig *con
 	}
 
 	return runnerConfig, nil
+}
+
+func runDaemonServer() {
+	mux := http.NewServeMux()
+
+	srv := &http.Server{
+		Addr:    ":5050",
+		Handler: mux,
+	}
+
+	mux.HandleFunc("/status", func(writer http.ResponseWriter, request *http.Request) {
+		defer request.Body.Close()
+
+		status := struct {
+			Up bool
+		}{Up: true}
+
+		decoder := json.NewDecoder(request.Body)
+		err := decoder.Decode(&status)
+		if err != nil {
+			log.Error(err)
+		}
+
+		return
+	})
+	mux.Handle("/metrics", promhttp.Handler())
+
+	idleConnsClosed := make(chan struct{})
+	go func() {
+		signalCh := make(chan os.Signal, 1)
+		signal.Notify(signalCh, os.Interrupt)
+		signal.Notify(signalCh, os.Kill)
+		signal.Notify(signalCh, syscall.SIGTERM)
+		signal.Notify(signalCh, syscall.SIGQUIT)
+		signal.Notify(signalCh, syscall.SIGKILL)
+
+		<-signalCh
+
+		// We received an interrupt signal, shut down.
+		if err := srv.Shutdown(context.Background()); err != nil {
+			// Error from closing listeners, or context timeout:
+			log.Printf("HTTP server Shutdown: %v", err)
+		}
+		close(idleConnsClosed)
+	}()
+
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		// Error starting or closing listener:
+		log.Printf("HTTP server ListenAndServe: %v", err)
+	}
+
+	<-idleConnsClosed
 }

@@ -614,3 +614,7 @@ func (pr *perfRunner) createContractsSub(nodeURL, listenerID string) (subID stri
 
 	return sub.ID.String(), nil
 }
+
+func (pr *perfRunner) IsDaemon() bool {
+	return pr.daemon
+}
