@@ -48,7 +48,6 @@ type PerfRunner interface {
 	// Tokens
 	CreateTokenPool() error
 	RunTokenMint(nodeURL string, id int)
-	IsDaemon() bool
 }
 
 type perfRunner struct {
@@ -630,8 +629,4 @@ func (pr *perfRunner) createContractsSub(nodeURL, listenerID string) (subID stri
 	log.Infof("Created contracts subscription on %s: %s", nodeURL, fmt.Sprintf("contracts_%s", pr.tagPrefix))
 
 	return sub.ID.String(), nil
-}
-
-func (pr *perfRunner) IsDaemon() bool {
-	return pr.daemon
 }
