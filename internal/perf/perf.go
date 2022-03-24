@@ -241,6 +241,15 @@ perfLoop:
 	}
 
 	pr.shutdown <- true
+	log.Info("Perf tests stopping...")
+
+	// we sleep on shutdown / completion to allow for Prometheus metrics to be scraped one final time
+	// about 10s into our sleep all workers should be completed, so we check for delinquent messages
+	// one last time so metrics are up-to-date
+	log.Warn("Runner stopping in 30s")
+	time.Sleep(10 * time.Second)
+	pr.getDelinquentMsgs()
+	time.Sleep(20 * time.Second)
 
 	return nil
 }
@@ -484,7 +493,7 @@ func (pr *perfRunner) getDelinquentMsgs() {
 	}
 
 	log.Warnf("Delinquent Messages:\n%s", string(dw))
-	if len(delinquentMsgs) > 0 && (pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() && !pr.daemon) {
+	if len(delinquentMsgs) > 0 && (pr.cfg.DelinquentAction == conf.DelinquentActionExit.String()) {
 		os.Exit(1)
 	}
 }
