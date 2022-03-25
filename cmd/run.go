@@ -170,7 +170,7 @@ func generateRunnerConfigFromInstance(instance *conf.InstanceConfig, perfConfig 
 
 	if runnerConfig.StackJSONPath == "" {
 		runnerConfig.Nodes = map[string]conf.Node{
-			"did:firefly:node/org": {
+			"did:firefly:node/node_0": {
 				DID:     "did:firefly:node/node_0",
 				URL:     "http://localhost:5000",
 				Name:    "node_0",

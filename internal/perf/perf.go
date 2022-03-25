@@ -118,6 +118,7 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 		nodes:           config.Nodes,
 		subscriptionMap: make(map[string]SubscriptionInfo),
 		daemon:          config.Daemon,
+		sender:          config.Sender,
 	}
 }
 
