@@ -66,12 +66,13 @@ type perfRunner struct {
 	poolName        string
 	shutdown        chan bool
 	tagPrefix       string
-	wsconns         []wsclient.WSClient
+	wsconns         map[string]wsclient.WSClient
 	wsReceivers     []chan bool
 	wsUUID          fftypes.UUID
-	nodeURLs        []string
+	nodes           map[string]conf.Node
 	subscriptionMap map[string]SubscriptionInfo
 	daemon          bool
+	sender          string
 }
 
 type SubscriptionInfo struct {
@@ -88,16 +89,16 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 		wsReceivers = append(wsReceivers, make(chan bool))
 	}
 
-	wsconns := make([]wsclient.WSClient, len(config.NodeURLs))
+	wsconns := make(map[string]wsclient.WSClient, len(config.Nodes))
 
-	for i, nodeURL := range config.NodeURLs {
+	for did, node := range config.Nodes {
 		// Create websocket client
-		wsConfig := conf.GenerateWSConfig(nodeURL, &config.WebSocket)
+		wsConfig := conf.GenerateWSConfig(node.URL, &config.WebSocket)
 		wsconn, err := wsclient.New(context.Background(), wsConfig, nil, nil)
 		if err != nil {
 			log.Error("Could not create websocket connection: %s", err)
 		}
-		wsconns[i] = wsconn
+		wsconns[did] = wsconn
 	}
 
 	wsUUID := *fftypes.NewUUID()
@@ -114,14 +115,18 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 		wsconns:         wsconns,
 		wsReceivers:     wsReceivers,
 		wsUUID:          wsUUID,
-		nodeURLs:        config.NodeURLs,
+		nodes:           config.Nodes,
 		subscriptionMap: make(map[string]SubscriptionInfo),
 		daemon:          config.Daemon,
 	}
 }
 
 func (pr *perfRunner) Init() (err error) {
-	pr.client = getFFClient(pr.nodeURLs[0])
+	pr.client = getFFClient(pr.nodes[pr.sender].URL)
+
+	if pr.nodes[pr.sender].Username != "" && pr.nodes[pr.sender].Password != "" {
+		pr.client.SetBasicAuth(pr.nodes[pr.sender].Username, pr.nodes[pr.sender].Password)
+	}
 
 	return nil
 }
@@ -135,56 +140,56 @@ func (pr *perfRunner) Start() (err error) {
 		}
 	}
 
-	for _, nodeURL := range pr.nodeURLs {
+	for _, node := range pr.nodes {
 		// Create contract sub and listener, if needed
 		var listenerID string
 		if containsTargetCmd(pr.cfg.Tests, conf.PerfTestCustomEthereumContract) {
-			listenerID, err = pr.createEthereumContractListener(nodeURL)
+			listenerID, err = pr.createEthereumContractListener(node.URL)
 			if err != nil {
 				return err
 			}
-			subID, err := pr.createContractsSub(nodeURL, listenerID)
+			subID, err := pr.createContractsSub(node.URL, listenerID)
 			if err != nil {
 				return err
 			}
 			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
+				NodeURL: node.URL,
 				Job:     conf.PerfTestCustomEthereumContract,
 			}
 		}
 
 		if containsTargetCmd(pr.cfg.Tests, conf.PerfTestCustomFabricContract) {
-			listenerID, err = pr.createFabricContractListener(nodeURL)
+			listenerID, err = pr.createFabricContractListener(node.URL)
 			if err != nil {
 				return err
 			}
-			subID, err := pr.createContractsSub(nodeURL, listenerID)
+			subID, err := pr.createContractsSub(node.URL, listenerID)
 
 			if err != nil {
 				return err
 			}
 			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
+				NodeURL: node.URL,
 				Job:     conf.PerfTestCustomFabricContract,
 			}
 		}
 
 		// Create subscription for message confirmations
-		subID, err := pr.createMsgConfirmSub(nodeURL, pr.tagPrefix, fmt.Sprintf("^%s_", pr.tagPrefix))
+		subID, err := pr.createMsgConfirmSub(node.URL, pr.tagPrefix, fmt.Sprintf("^%s_", pr.tagPrefix))
 		if err != nil {
 			return err
 		}
 		pr.subscriptionMap[subID] = SubscriptionInfo{
-			NodeURL: nodeURL,
+			NodeURL: node.URL,
 			Job:     conf.PerfTestBroadcast,
 		}
 		// Create subscription for blob message confirmations
-		subID, err = pr.createMsgConfirmSub(nodeURL, fmt.Sprintf("blob_%s", pr.tagPrefix), fmt.Sprintf("^blob_%s_", pr.tagPrefix))
+		subID, err = pr.createMsgConfirmSub(node.URL, fmt.Sprintf("blob_%s", pr.tagPrefix), fmt.Sprintf("^blob_%s_", pr.tagPrefix))
 		if err != nil {
 			return err
 		}
 		pr.subscriptionMap[subID] = SubscriptionInfo{
-			NodeURL: nodeURL,
+			NodeURL: node.URL,
 			Job:     conf.PerfTestBlobBroadcast,
 		}
 	}
@@ -382,7 +387,7 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 				log.Infof("%d --> Sent blob: %s", id, msgRes.Header.ID)
 			}
 			// Wait for worker to confirm the message before proceeding to next task
-			for i := 0; i < len(pr.nodeURLs); i++ {
+			for i := 0; i < len(pr.nodes); i++ {
 				<-pr.wsReceivers[id]
 			}
 			log.Infof("%d <-- %s Finished", id, action)
