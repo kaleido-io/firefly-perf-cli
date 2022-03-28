@@ -69,8 +69,8 @@ type InstanceConfig struct {
 	Length           time.Duration   `yaml:"length" json:"length"`
 	MessageOptions   MessageOptions  `json:"messageOptions,omitempty" yaml:"messageOptions,omitempty"`
 	Sender           string          `json:"sender" yaml:"sender"`
-	Recipient        string          `json:"recipient" yaml:"recipient"`
-	RecipientAddress string          `json:"recipientAddress" yaml:"recipientAddress"`
+	Recipient        string          `json:"recipient,omitempty" yaml:"recipient,omitempty"`
+	RecipientAddress string          `json:"recipientAddress,omitempty" yaml:"recipientAddress,omitempty"`
 	TokenOptions     TokenOptions    `json:"tokenOptions,omitempty" yaml:"tokenOptions,omitempty"`
 	ContractOptions  ContractOptions `json:"contractOptions,omitempty" yaml:"contractOptions,omitempty"`
 	Workers          int             `json:"workers" yaml:"workers"`
