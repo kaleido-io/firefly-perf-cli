@@ -56,6 +56,11 @@ var perfTestDurationHistogram = prometheus.NewHistogramVec(prometheus.HistogramO
 	Buckets:   []float64{0.5, 1.0, 2.0, 5.0, 10.0},
 }, []string{"test"})
 
+func init() {
+	prometheus.Register(deliquentMsgsCounter)
+	prometheus.Register(perfTestDurationHistogram)
+}
+
 type PerfRunner interface {
 	Init() error
 	Start() error
