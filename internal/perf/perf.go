@@ -39,11 +39,22 @@ import (
 var mutex = &sync.Mutex{}
 var NAMESPACE = "default"
 var TRANSPORT_TYPE = "websockets"
+
+var METRICS_NAMESPACE = "ffperf"
+var METRICS_SUBSYSTEM = "runner"
+
 var deliquentMsgsCounter = prometheus.NewCounter(prometheus.CounterOpts{
-	Namespace: "ffperf",
+	Namespace: METRICS_NAMESPACE,
 	Name:      "deliquent_msgs_total",
-	Subsystem: "runner",
+	Subsystem: METRICS_SUBSYSTEM,
 })
+
+var perfTestDurationHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Namespace: METRICS_NAMESPACE,
+	Subsystem: METRICS_SUBSYSTEM,
+	Name:      "perf_test_duration_seconds",
+	Buckets:   []float64{0.5, 1.0, 2.0, 5.0, 10.0},
+}, []string{"test"})
 
 type PerfRunner interface {
 	Init() error
@@ -360,6 +371,14 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 		select {
 		case <-pr.bfr:
 			// Worker sends its task
+			hist, histErr := perfTestDurationHistogram.GetMetricWith(prometheus.Labels{
+				"test": action,
+			})
+			if histErr != nil {
+				log.Errorf("Error retreiving histogram: %s", err)
+			}
+			startTime := time.Now()
+
 			res, err := req.Post(fmt.Sprintf("%s/api/v1/namespaces/default/%s", nodeURL, ep))
 			if err != nil {
 				log.Errorf("Error sending POST /%s: %s", ep, err)
@@ -390,6 +409,9 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 			// Wait for worker to confirm the message before proceeding to next task
 			for i := 0; i < len(pr.nodes); i++ {
 				<-pr.wsReceivers[id]
+			}
+			if histErr == nil {
+				hist.Observe(time.Since(startTime).Seconds())
 			}
 			log.Infof("%d <-- %s Finished", id, action)
 		case <-pr.shutdown:
