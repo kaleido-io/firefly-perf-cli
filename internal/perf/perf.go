@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"os"
 	"os/signal"
 	"strconv"
@@ -38,6 +39,11 @@ import (
 var mutex = &sync.Mutex{}
 var NAMESPACE = "default"
 var TRANSPORT_TYPE = "websockets"
+var deliquentMsgsCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "ffperf",
+	Name:      "deliquent_msgs_total",
+	Subsystem: "runner",
+})
 
 type PerfRunner interface {
 	Init() error
@@ -494,6 +500,7 @@ func (pr *perfRunner) detectDeliquentMsgs() bool {
 	}
 
 	log.Warnf("Delinquent Messages:\n%s", string(dw))
+	deliquentMsgsCounter.Add(float64(len(delinquentMsgs)))
 	return len(delinquentMsgs) > 0
 }
 
