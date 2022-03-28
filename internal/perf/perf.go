@@ -375,7 +375,7 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 				"test": action,
 			})
 			if histErr != nil {
-				log.Errorf("Error retreiving histogram: %s", err)
+				log.Errorf("Error retreiving histogram: %s", histErr)
 			}
 			startTime := time.Now()
 
