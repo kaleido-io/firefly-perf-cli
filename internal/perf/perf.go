@@ -254,6 +254,8 @@ func (pr *perfRunner) Start() (err error) {
 
 perfLoop:
 	for pr.daemon || time.Now().Unix() < pr.endTime {
+		timeout := time.After(60 * time.Second)
+
 		select {
 		case <-signalCh:
 			break perfLoop
@@ -265,6 +267,12 @@ perfLoop:
 				}
 				lastCheckedTime = time.Now()
 			}
+			break
+		case <-timeout:
+			if pr.detectDeliquentMsgs() && pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
+				break perfLoop
+			}
+			lastCheckedTime = time.Now()
 			break
 		}
 	}
