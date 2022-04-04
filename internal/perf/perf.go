@@ -77,10 +77,10 @@ type perfRunner struct {
 	cfg             *conf.PerfRunnerConfig
 	client          *resty.Client
 	ctx             context.Context
+	cancel          context.CancelFunc
 	endTime         int64
 	msgTimeMap      map[string]time.Time
 	poolName        string
-	shutdown        chan bool
 	tagPrefix       string
 	wsconns         map[string]wsclient.WSClient
 	wsReceivers     []chan bool
@@ -118,14 +118,15 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 	}
 
 	wsUUID := *fftypes.NewUUID()
+	ctx, cancel := context.WithCancel(context.Background())
 
 	return &perfRunner{
 		bfr:             make(chan int, config.Workers),
 		cfg:             config,
-		ctx:             context.Background(),
+		ctx:             ctx,
+		cancel:          cancel,
 		endTime:         time.Now().Unix() + int64(config.Length.Seconds()),
 		poolName:        poolName,
-		shutdown:        make(chan bool),
 		tagPrefix:       fmt.Sprintf("perf_%s", wsUUID.String()),
 		msgTimeMap:      make(map[string]time.Time),
 		wsconns:         wsconns,
@@ -255,7 +256,6 @@ perfLoop:
 	for pr.daemon || time.Now().Unix() < pr.endTime {
 		select {
 		case <-signalCh:
-			pr.detectDeliquentMsgs()
 			break perfLoop
 		case pr.bfr <- i:
 			i++
@@ -269,8 +269,10 @@ perfLoop:
 		}
 	}
 
-	pr.shutdown <- true
 	log.Info("Perf tests stopping...")
+	log.Warn("Shutting down all workers...")
+	log.Warn("Stopping event loops...")
+	pr.cancel()
 
 	// we sleep on shutdown / completion to allow for Prometheus metrics to be scraped one final time
 	// about 10s into our sleep all workers should be completed, so we check for delinquent messages
@@ -413,13 +415,18 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 			}
 			// Wait for worker to confirm the message before proceeding to next task
 			for i := 0; i < len(pr.nodes); i++ {
-				<-pr.wsReceivers[id]
+				select {
+				case <-pr.ctx.Done():
+					return nil
+				case <-pr.wsReceivers[id]:
+					break
+				}
 			}
 			if histErr == nil {
 				hist.Observe(time.Since(startTime).Seconds())
 			}
 			log.Infof("%d <-- %s Finished", id, action)
-		case <-pr.shutdown:
+		case <-pr.ctx.Done():
 			return nil
 		}
 	}
