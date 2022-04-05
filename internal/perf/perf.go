@@ -422,7 +422,11 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 				log.Infof("%d --> Sent blob: %s", id, msgRes.Header.ID)
 			}
 			// Wait for worker to confirm the message before proceeding to next task
-			for i := 0; i < len(pr.nodes); i++ {
+			confirmations := len(pr.nodes)
+			if action == conf.PerfTestBlobPrivateMsg.String() || action == conf.PerfTestPrivateMsg.String() {
+				confirmations = 2
+			}
+			for i := 0; i < confirmations; i++ {
 				select {
 				case <-pr.ctx.Done():
 					return nil
