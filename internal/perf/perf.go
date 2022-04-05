@@ -77,7 +77,7 @@ type perfRunner struct {
 	cfg             *conf.PerfRunnerConfig
 	client          *resty.Client
 	ctx             context.Context
-	cancel          context.CancelFunc
+	shutdown        context.CancelFunc
 	endTime         int64
 	msgTimeMap      map[string]time.Time
 	poolName        string
@@ -105,31 +105,18 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 		wsReceivers = append(wsReceivers, make(chan bool))
 	}
 
-	wsconns := make(map[string]wsclient.WSClient, len(config.Nodes))
-
-	for did, node := range config.Nodes {
-		// Create websocket client
-		wsConfig := conf.GenerateWSConfig(node.URL, &config.WebSocket)
-		wsconn, err := wsclient.New(context.Background(), wsConfig, nil, nil)
-		if err != nil {
-			log.Error("Could not create websocket connection: %s", err)
-		}
-		wsconns[did] = wsconn
-	}
-
 	wsUUID := *fftypes.NewUUID()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &perfRunner{
+	pr := &perfRunner{
 		bfr:             make(chan int, config.Workers),
 		cfg:             config,
 		ctx:             ctx,
-		cancel:          cancel,
+		shutdown:        cancel,
 		endTime:         time.Now().Unix() + int64(config.Length.Seconds()),
 		poolName:        poolName,
 		tagPrefix:       fmt.Sprintf("perf_%s", wsUUID.String()),
 		msgTimeMap:      make(map[string]time.Time),
-		wsconns:         wsconns,
 		wsReceivers:     wsReceivers,
 		wsUUID:          wsUUID,
 		nodes:           config.Nodes,
@@ -137,6 +124,21 @@ func New(config *conf.PerfRunnerConfig) PerfRunner {
 		daemon:          config.Daemon,
 		sender:          config.Sender,
 	}
+
+	wsconns := make(map[string]wsclient.WSClient, len(config.Nodes))
+
+	for did, node := range config.Nodes {
+		// Create websocket client
+		wsConfig := conf.GenerateWSConfig(node.URL, &config.WebSocket)
+		wsconn, err := wsclient.New(pr.ctx, wsConfig, nil, pr.startSubscriptions)
+		if err != nil {
+			log.Error("Could not create websocket connection: %s", err)
+		}
+		wsconns[did] = wsconn
+	}
+
+	pr.wsconns = wsconns
+	return pr
 }
 
 func (pr *perfRunner) Init() (err error) {
@@ -280,7 +282,7 @@ perfLoop:
 	log.Info("Perf tests stopping...")
 	log.Warn("Shutting down all workers...")
 	log.Warn("Stopping event loops...")
-	pr.cancel()
+	pr.shutdown()
 
 	// we sleep on shutdown / completion to allow for Prometheus metrics to be scraped one final time
 	// about 10s into our sleep all workers should be completed, so we check for delinquent messages
@@ -328,7 +330,7 @@ func (pr *perfRunner) eventLoop(wsconn wsclient.WSClient) (err error) {
 					b, _ := json.Marshal(&event)
 					log.Infof("Full event: %s", b)
 				} else {
-					log.Infof("\n\t%d - Received \n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, workerID, event.ID.String(), workerID, event.Reference)
+					log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, wsconn.URL(), workerID, event.ID.String(), workerID, event.Reference)
 				}
 				pr.deleteMsgTime(strconv.Itoa(workerID))
 			default:
@@ -489,7 +491,13 @@ func (pr *perfRunner) createMsgConfirmSub(nodeURL, name, tag string) (subID stri
 }
 
 func (pr *perfRunner) openWsClient(wsconn wsclient.WSClient) (err error) {
-	wsconn.Connect()
+	if err := wsconn.Connect(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (pr *perfRunner) startSubscriptions(ctx context.Context, wsconn wsclient.WSClient) (err error) {
 	if err := pr.startSubscription(wsconn, pr.tagPrefix); err != nil {
 		return err
 	}
