@@ -354,7 +354,7 @@ func (pr *perfRunner) eventLoop(wsconn wsclient.WSClient) (err error) {
 				}
 
 				pr.deleteMsgTime(event.Message.Header.ID.String())
-				log.Infof("\n\t%d - Received \n\t%d --- Event ID: %s\n\t%d --- Message ID: %s\n\t%d --- Data ID: %s", workerID, workerID, event.ID.String(), workerID, event.Message.Header.ID.String(), workerID, event.Message.Data[0].ID)
+				log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Message ID: %s\n\t%d --- Data ID: %s", workerID, wsconn.URL(), workerID, event.ID.String(), workerID, event.Message.Header.ID.String(), workerID, event.Message.Data[0].ID)
 				if subInfo.Job == conf.PerfTestBlobBroadcast {
 					pr.downloadAndVerifyBlob(subInfo.NodeURL, event.Message.Data[0].ID.String(), *event.Message.Data[0].Hash)
 				}
