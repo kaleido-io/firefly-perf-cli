@@ -426,6 +426,7 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 			if action == conf.PerfTestBlobPrivateMsg.String() || action == conf.PerfTestPrivateMsg.String() {
 				confirmations = 2
 			}
+
 			for i := 0; i < confirmations; i++ {
 				select {
 				case <-pr.ctx.Done():
@@ -434,9 +435,11 @@ func (pr *perfRunner) sendAndWait(req *resty.Request, nodeURL, ep string, id int
 					break
 				}
 			}
+
 			if histErr == nil {
 				hist.Observe(time.Since(startTime).Seconds())
 			}
+
 			log.Infof("%d <-- %s Finished", id, action)
 		case <-pr.ctx.Done():
 			return nil
