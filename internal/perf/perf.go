@@ -79,6 +79,12 @@ var receivedEventsCounter = prometheus.NewCounter(prometheus.CounterOpts{
 	Subsystem: METRICS_SUBSYSTEM,
 })
 
+var sentAcksCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: METRICS_NAMESPACE,
+	Name:      "sent_acks_total",
+	Subsystem: METRICS_SUBSYSTEM,
+})
+
 var incompleteEventsCounter = prometheus.NewCounter(prometheus.CounterOpts{
 	Namespace: METRICS_NAMESPACE,
 	Name:      "incomplete_events_total",
@@ -98,15 +104,31 @@ var perfTestDurationHistogram = prometheus.NewHistogramVec(prometheus.HistogramO
 	Buckets:   []float64{1.0, 2.0, 5.0, 10.0, 30.0},
 }, []string{"test"})
 
+var transactionsPerBlock = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Namespace: METRICS_NAMESPACE,
+	Name:      "transactions_per_block",
+	Subsystem: METRICS_SUBSYSTEM,
+	Buckets:   []float64{50, 100, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000},
+})
+
+var transactionsPerBlockCount = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: METRICS_NAMESPACE,
+	Name:      "transactions_per_block_live",
+	Subsystem: METRICS_SUBSYSTEM,
+})
+
 func init() {
 	prometheus.Register(deliquentMsgsCounter)
 	prometheus.Register(sentMintsCounter)
 	prometheus.Register(sentMintErrorCounter)
 	prometheus.Register(mintBalanceGauge)
 	prometheus.Register(receivedEventsCounter)
+	prometheus.Register(sentAcksCounter)
 	prometheus.Register(incompleteEventsCounter)
 	prometheus.Register(totalActionsCounter)
 	prometheus.Register(perfTestDurationHistogram)
+	prometheus.Register(transactionsPerBlock)
+	prometheus.Register(transactionsPerBlockCount)
 }
 
 func getMetricVal(collector prometheus.Collector) float64 {
@@ -152,6 +174,7 @@ type inflightTest struct {
 }
 
 var mintStartingBalance int
+var protocolErrors int
 
 type perfRunner struct {
 	bfr               chan int
@@ -454,11 +477,21 @@ perfLoop:
 	log.Infof(" - Completed actions: %d", pr.totalSummary)
 	log.Infof(" - Completed actions/sec: %2f", float64(pr.totalSummary)/float64(endTime-pr.startTime))
 
+	if protocolErrors > 0 {
+		log.Error("Should not have any protocol errors")
+
+		pr.shutdown()
+	}
+
 	return nil
 }
 
 func (pr *perfRunner) eventLoop(nodeURL string, wsconn wsclient.WSClient) (err error) {
 	log.Infof("Event loop started for %s...", nodeURL)
+
+	var prevBlock int64
+	var txnsPerBlock int
+
 	for {
 		select {
 		// Wait to receive websocket event
@@ -502,29 +535,56 @@ func (pr *perfRunner) eventLoop(nodeURL string, wsconn wsclient.WSClient) (err e
 					log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, wsconn.URL(), workerID, event.ID.String(), workerID, event.Reference)
 				}
 			case core.EventTypeTransferConfirmed:
-				if pr.cfg.TokenOptions.SupportsURI {
-					// If there's a URI in the event we'll have put the worker ID there
-					uriElements := strings.Split(event.TokenTransfer.URI, "//")
-					if len(uriElements) == 2 {
-						workerID, err = strconv.Atoi(uriElements[1])
-						if err != nil {
-							log.Errorf("Could not parse event value: %s", err)
-							b, _ := json.Marshal(&event)
-							log.Infof("Full event: %s", b)
-						} else {
-							log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, wsconn.URL(), workerID, event.ID.String(), workerID, event.Reference)
-						}
+
+				if event.TokenTransfer != nil {
+					blockNumber, err := strconv.ParseInt(strings.Split(event.TokenTransfer.ProtocolID, "/")[0], 10, 64)
+
+					if err != nil {
+						log.Warnf("\nFailed to parse block number from protocol ID '%s'", event.TokenTransfer.ProtocolID)
+					}
+					if blockNumber != prevBlock {
+						prevBlock = blockNumber
+						transactionsPerBlock.Observe(float64(txnsPerBlock))
+						transactionsPerBlockCount.Set(float64(txnsPerBlock))
+						log.Infof("\nBlock %d: %d transactions", blockNumber, txnsPerBlock)
+						txnsPerBlock = 0
 					} else {
-						log.Errorf("No URI in token transfer event: %s")
-						b, _ := json.Marshal(&event)
-						log.Errorf("Full event: %s", b)
+						txnsPerBlock++
+					}
 
-						incompleteEventsCounter.Inc()
+					if pr.cfg.TokenOptions.SupportsURI {
+						if len(event.TokenTransfer.URI) == 0 {
+							if pr.cfg.DelinquentAction == string(conf.DelinquentActionExit) {
+								log.Panic(fmt.Errorf("Error - no URI found in token_transfer_confirmed event"))
+							} else {
+								log.Warn("Token URI not present in token_transfer_confirmed event")
+							}
+						}
+						// If there's a URI in the event we'll have put the worker ID there
+						uriElements := strings.Split(event.TokenTransfer.URI, "//")
+						if len(uriElements) == 2 {
+							workerID, err = strconv.Atoi(uriElements[1])
+							if err != nil {
+								log.Errorf("Could not parse event value: %s", err)
+								b, _ := json.Marshal(&event)
+								log.Infof("Full event: %s", b)
+							} else {
+								log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, wsconn.URL(), workerID, event.ID.String(), workerID, event.Reference)
+							}
+						} else {
+							log.Errorf("No URI in token transfer event: %s")
+							b, _ := json.Marshal(&event)
+							log.Errorf("Full event: %s", b)
 
-						if pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
-							log.Panic(fmt.Errorf("Error - no URI found in token_transfer_confirmed event"))
+							incompleteEventsCounter.Inc()
+
+							if pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
+								log.Panic(fmt.Errorf("Error - no URI found in token_transfer_confirmed event"))
+							}
 						}
 					}
+				} else {
+					log.Warnf("event.TokenTransfer nil; %v\n", event)
 				}
 			default:
 				workerIDFromTag := ""
@@ -532,7 +592,11 @@ func (pr *perfRunner) eventLoop(nodeURL string, wsconn wsclient.WSClient) (err e
 				if event.Type.String() == "protocol_error" {
 					// Can't do anything but shut down gracefully
 					log.Error("Protocol error event - shutting down")
-					pr.shutdown()
+					protocolErrors++
+
+					if pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
+						pr.shutdown()
+					}
 				} else {
 					subInfo, ok := pr.subscriptionMap[event.Subscription.ID.String()]
 					if !ok {
@@ -572,6 +636,7 @@ func (pr *perfRunner) eventLoop(nodeURL string, wsconn wsclient.WSClient) (err e
 			}
 			ackJSON, _ := json.Marshal(ack)
 			wsconn.Send(pr.ctx, ackJSON)
+			sentAcksCounter.Inc()
 			// Release worker so it can continue to its next task
 			if !pr.cfg.SkipMintConfirmations {
 				if workerID >= 0 {
@@ -656,6 +721,7 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 					} else {
 						log.Errorf("Worker %d error running job (logging but continuing): %s", workerID, err)
 						err = nil
+						actionsCompleted--
 						continue
 					}
 				} else {
