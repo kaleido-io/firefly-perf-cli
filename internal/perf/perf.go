@@ -573,7 +573,7 @@ func (pr *perfRunner) eventLoop(nodeURL string, wsconn wsclient.WSClient) (err e
 			ackJSON, _ := json.Marshal(ack)
 			wsconn.Send(pr.ctx, ackJSON)
 			// Release worker so it can continue to its next task
-			if !pr.cfg.SkipMintConfirmations {
+			if !pr.cfg.SkipTransactionConfirmations {
 				if workerID >= 0 {
 					pr.wsReceivers[workerID] <- nodeURL
 				}
@@ -667,7 +667,10 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 				log.Infof("%d --> %s Sent %s: %s", workerID, testName, idType, trackingID)
 			}
 
-			if testName == conf.PerfTestTokenMint.String() && pr.cfg.SkipMintConfirmations {
+			if pr.cfg.SkipTransactionConfirmations &&
+				(testName == conf.PerfTestTokenMint.String() ||
+					testName == conf.PerfTestCustomEthereumContract.String() ||
+					testName == conf.PerfTestCustomFabricContract.String()) {
 				// For minting tests a worker can (if configured) skip waiting for a matching response event
 				// before making itself available for the next job
 				confirmationsPerAction = 0

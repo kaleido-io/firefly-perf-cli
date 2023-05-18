@@ -203,7 +203,7 @@ func generateRunnerConfigFromInstance(instance *conf.InstanceConfig, perfConfig 
 	}
 
 	// Common configuration regardless of running with manually defined nodes or a local stack
-	runnerConfig.SkipMintConfirmations = instance.SkipMintConfirmations
+	runnerConfig.SkipTransactionConfirmations = instance.SkipTransactionConfirmations
 	runnerConfig.Length = instance.Length
 	runnerConfig.Daemon = perfConfig.Daemon
 	runnerConfig.LogEvents = perfConfig.LogEvents

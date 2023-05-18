@@ -21,7 +21,7 @@ instances:
         workers: 4
     fireflyNamespace: default
     maxTimePerAction: 300s
-    skipMintConfirmations: true
+    skipTransactionConfirmations: true
     startRate: 1
     endRate: 20
     rateRampUpTime: 60m
