@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/hyperledger/firefly-perf-cli/internal/conf"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/hyperledger/firefly-common/pkg/fftypes"
 )
