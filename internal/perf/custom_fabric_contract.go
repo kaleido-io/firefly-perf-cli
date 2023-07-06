@@ -20,7 +20,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/hyperledger/firefly-perf-cli/internal/conf"
 
 	"github.com/hyperledger/firefly-common/pkg/fftypes"
@@ -126,6 +128,7 @@ func (tc *customFabric) RunOnce() (string, error) {
 	}`, tc.pr.cfg.ContractOptions.Channel, tc.pr.cfg.ContractOptions.Chaincode, idempotencyKey, tc.workerID, tc.pr.cfg.SigningKey, idempotencyKey, invokeOptionsJSON)
 	var resContractCall map[string]interface{}
 	var resError fftypes.RESTError
+	startTime := time.Now()
 	res, err := tc.pr.client.R().
 		SetHeaders(map[string]string{
 			"Accept":       "application/json",
@@ -135,6 +138,8 @@ func (tc *customFabric) RunOnce() (string, error) {
 		SetResult(&resContractCall).
 		SetError(&resError).
 		Post(fmt.Sprintf("%s/%sapi/v1/namespaces/%s/contracts/invoke", tc.pr.client.BaseURL, tc.pr.cfg.APIPrefix, tc.pr.cfg.FFNamespace))
+	latency := time.Since(startTime)
+	log.Debugf(`Worker: "%v" Action: "%v" Status: "%v" Latency: "%v"`, tc.workerID, tc.iteration, res.StatusCode(), latency)
 	if err != nil || res.IsError() {
 		return "", fmt.Errorf("Error invoking contract [%d]: %s (%+v)", resStatus(res), err, &resError)
 	}
