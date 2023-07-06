@@ -257,7 +257,7 @@ func New(config *conf.RunnerConfig) PerfRunner {
 }
 
 func (pr *perfRunner) Init() (err error) {
-	pr.client = getFFClient(pr.sender)
+	pr.client = pr.getFFClient(pr.sender)
 	pr.client.SetBasicAuth(pr.cfg.WebSocket.AuthUsername, pr.cfg.WebSocket.AuthPassword)
 	// Set request retry with backoff
 	pr.client.
@@ -907,8 +907,15 @@ func containsTargetTest(tests []conf.TestCaseConfig, target fftypes.FFEnum) bool
 	return false
 }
 
-func getFFClient(node string) *resty.Client {
+func (pr *perfRunner) getFFClient(node string) *resty.Client {
 	client := resty.New()
+	restyLogger := log.New()
+	if pr.cfg.LogLevel != "" {
+		if level, err := log.ParseLevel(pr.cfg.LogLevel); err == nil {
+			restyLogger.SetLevel(level)
+		}
+	}
+	client.SetLogger(restyLogger)
 	client.SetBaseURL(node)
 	client.SetTLSClientConfig(&tls.Config{InsecureSkipVerify: true})
 	return client
