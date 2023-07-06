@@ -136,7 +136,7 @@ func (tc *customFabric) RunOnce() (string, error) {
 		SetResult(&resContractCall).
 		SetError(&resError).
 		Post(fmt.Sprintf("%s/%sapi/v1/namespaces/%s/contracts/invoke", tc.pr.client.BaseURL, tc.pr.cfg.APIPrefix, tc.pr.cfg.FFNamespace))
-	log.Debugf(`Worker: "%v" Action: "%v" IdempotencyKey: "" StatusCode: "%v" Time: "%v"`, tc.workerID, tc.iteration, idempotencyKey, res.StatusCode(), res.Time())
+	log.Debugf(`Worker: "%v" Action: "%v" IdempotencyKey: "%s" StatusCode: "%v" Time: "%v"`, tc.workerID, tc.iteration, idempotencyKey, res.StatusCode(), res.Time())
 	if err != nil || res.IsError() {
 		return "", fmt.Errorf("Error invoking contract [%d]: %s (%+v)", resStatus(res), err, &resError)
 	}
