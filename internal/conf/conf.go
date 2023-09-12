@@ -18,6 +18,7 @@ package conf
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net/url"
 	"time"
 
@@ -141,7 +142,7 @@ func GenerateWSConfig(nodeURL string, conf *FireFlyWsConfig) *wsclient.WSConfig 
 	t, _ := url.QueryUnescape(conf.WSPath)
 
 	return &wsclient.WSConfig{
-		HTTPURL:                nodeURL,
+		HTTPURL:                fmt.Sprintf("%sapi/FireflyService/%s", nodeURL, "perf-ns"),
 		WSKeyPath:              t,
 		ReadBufferSize:         conf.ReadBufferSize,
 		WriteBufferSize:        conf.WriteBufferSize,
