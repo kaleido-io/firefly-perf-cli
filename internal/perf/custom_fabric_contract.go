@@ -82,7 +82,7 @@ func (tc *customFabric) RunOnce() (string, error) {
 						"details": {
 							"type": "string"
 						}
-					}
+					}api/FireflyService/%s
 				},
 				{
 					"name": "size",

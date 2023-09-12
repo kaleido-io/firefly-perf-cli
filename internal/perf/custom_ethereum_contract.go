@@ -85,7 +85,7 @@ func (tc *customEthereum) RunOnce() (string, error) {
 	}`, tc.pr.cfg.ContractOptions.Address, tc.workerID, idempotencyKey, invokeOptionsJSON)
 	var resContractCall map[string]interface{}
 	var resError fftypes.RESTError
-	res, err := tc.pr.client.R().
+	res, err := tc.pr.clientapi/FireflyService/%s
 		SetHeaders(map[string]string{
 			"Accept":       "application/json",
 			"Content-Type": "application/json",

@@ -68,7 +68,7 @@ func (t *testBase) uploadBlob(blob []byte, hash [32]byte, nodeURL string) (strin
 		SetFormData(formData).
 		SetFileReader("file", "myfile.txt", bytes.NewReader(blob)).
 		SetResult(&data).
-		Post(fmt.Sprintf("%s/api/v1/namespaces/%s/data", nodeURL, t.pr.cfg.FFNamespace))
+		Post(fmt.Sprintf("%s/api/FireflyService/%s/data", nodeURL, t.pr.cfg.FFNamespace))
 	if err != nil {
 		return "", nil
 	}
@@ -89,7 +89,7 @@ func (t *testBase) downloadAndVerifyBlob(nodeURL, id string, expectedHash [32]by
 			"Content-Type": "application/json",
 		}).
 		SetResult(&blob).
-		Get(fmt.Sprintf("%s/api/v1/namespaces/%s/data/%s/blob", nodeURL, t.pr.cfg.FFNamespace, id))
+		Get(fmt.Sprintf("%s/api/FireflyService/%s/data/%s/blob", nodeURL, t.pr.cfg.FFNamespace, id))
 	if err != nil {
 		return err
 	}
