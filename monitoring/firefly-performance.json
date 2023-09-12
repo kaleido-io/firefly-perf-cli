@@ -453,7 +453,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/v1/namespaces/{ns}/messages/broadcast\",code=~\"200|202\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/FireflyService/{ns}/messages/broadcast\",code=~\"200|202\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "",
@@ -512,7 +512,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=\"/api/v1/namespaces/{ns}/messages/broadcast\",code=\"500\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=\"/api/FireflyService/{ns}/messages/broadcast\",code=\"500\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "",
@@ -674,7 +674,7 @@
             "type": "prometheus"
           },
           "exemplar": false,
-          "expr": "ff_apiserver_rest_requests_total{route=\"/api/v1/namespaces/{ns}/messages/broadcast\",code=\"500\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=\"/api/FireflyService/{ns}/messages/broadcast\",code=\"500\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{code}}",
@@ -959,7 +959,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/v1/namespaces/{ns}/messages/private\",code=~\"202\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/FireflyService/{ns}/messages/private\",code=~\"202\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "",
@@ -1019,7 +1019,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=\"/api/v1/namespaces/{ns}/messages/private\",code=\"500\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=\"/api/FireflyService/{ns}/messages/private\",code=\"500\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "",
@@ -1185,7 +1185,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=\"/api/v1/namespaces/{ns}/messages/private\",code=\"500\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=\"/api/FireflyService/{ns}/messages/private\",code=\"500\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{code}}",
@@ -1470,7 +1470,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/v1/namespaces/{ns}/tokens/mint\",code=~\"200|202\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/FireflyService/{ns}/tokens/mint\",code=~\"200|202\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "",
@@ -1505,7 +1505,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "/api/v1/namespaces/{ns}/tokens/mint"
+              "options": "/api/FireflyService/{ns}/tokens/mint"
             },
             "properties": [
               {
@@ -1545,7 +1545,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/v1/namespaces/{ns}/tokens/mint\",code=\"500\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=~\"/api/FireflyService/{ns}/tokens/mint\",code=\"500\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "",
@@ -1689,7 +1689,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "/api/v1/namespaces/{ns}/tokens/mint"
+              "options": "/api/FireflyService/{ns}/tokens/mint"
             },
             "properties": [
               {
@@ -1727,7 +1727,7 @@
             "type": "prometheus"
           },
           "exemplar": true,
-          "expr": "ff_apiserver_rest_requests_total{route=\"/api/v1/namespaces/{ns}/tokens/mint\",code=\"500\",instance=\"$test_node\"}",
+          "expr": "ff_apiserver_rest_requests_total{route=\"/api/FireflyService/{ns}/tokens/mint\",code=\"500\",instance=\"$test_node\"}",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{code}}",
