@@ -139,7 +139,7 @@ type FireFlyWsConfig struct {
 }
 
 func GenerateWSConfig(nodeURL string, conf *FireFlyWsConfig) *wsclient.WSConfig {
-	t, _ := url.QueryUnescape(fmt.Sprintf("/api/FireflyService/%s", "perf-ns"))
+	t, _ := url.QueryUnescape(fmt.Sprintf("/api/FireflyService/%s/ws", "perf-ns"))
 
 	return &wsclient.WSConfig{
 		HTTPURL:                nodeURL,
