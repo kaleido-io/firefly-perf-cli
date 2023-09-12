@@ -85,7 +85,7 @@ func (tc *customEthereum) RunOnce() (string, error) {
 	}`, tc.pr.cfg.ContractOptions.Address, tc.workerID, idempotencyKey, invokeOptionsJSON)
 	var resContractCall map[string]interface{}
 	var resError fftypes.RESTError
-	res, err := tc.pr.clientapi/FireflyService/%s
+	res, err := tc.pr.client.R().
 		SetHeaders(map[string]string{
 			"Accept":       "application/json",
 			"Content-Type": "application/json",
@@ -93,7 +93,7 @@ func (tc *customEthereum) RunOnce() (string, error) {
 		SetBody([]byte(payload)).
 		SetResult(&resContractCall).
 		SetError(&resError).
-		Post(fmt.Sprintf("%s/%sapi/v1/namespaces/%s/contracts/invoke", tc.pr.client.BaseURL, tc.pr.cfg.APIPrefix, tc.pr.cfg.FFNamespace))
+		Post(fmt.Sprintf("%s/%sapi/FireflyService/%s/contracts/invoke", tc.pr.client.BaseURL, tc.pr.cfg.APIPrefix, tc.pr.cfg.FFNamespace))
 	if err != nil || res.IsError() {
 		if res.StatusCode() == 409 {
 			log.Warnf("Request already received by FireFly: %+v", &resError)
