@@ -52,7 +52,8 @@ func (r *Report) GenerateHTML() error {
                 display: block;
                 height: auto;
                 margin: 0 auto 20px auto;
-                width: 160px;
+                width: 100%;
+                max-width: 100%;
             }
     
             .sidebar-list {
