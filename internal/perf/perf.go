@@ -432,6 +432,14 @@ func (pr *perfRunner) Start() (err error) {
 	id := 0
 	for _, test := range pr.cfg.Tests {
 		log.Infof("Starting %d workers for case \"%s\"", test.Workers, test.Name)
+		var tso TransactionSimulatorOptions
+		var mod int
+		if test.Name == conf.PerfTestTransactionSimulator {
+			if err = json.Unmarshal(test.CustomOptions.Bytes(), &tso); err != nil {
+				return err
+			}
+			mod = tso.PartiesCount * (tso.PartiesCount - 1)
+		}
 		for iWorker := 0; iWorker < test.Workers; iWorker++ {
 			var tc TestCase
 
@@ -444,6 +452,28 @@ func (pr *perfRunner) Start() (err error) {
 				tc = newTokenMintTestWorker(pr, id, test.ActionsPerLoop)
 			case conf.PerfTestCustomEthereumContract:
 				tc = newCustomEthereumTestWorker(pr, id, test.ActionsPerLoop)
+			case conf.PerfTestTransactionSimulator:
+				roundCount := iWorker % mod
+				fromPartyIndex := roundCount/(tso.PartiesCount-1) + 1
+				toPartyIndex := roundCount%(tso.PartiesCount-1) + 1
+				if toPartyIndex >= fromPartyIndex {
+					toPartyIndex++
+				}
+				minAmount := 0
+				if tso.MinAmount != nil {
+					minAmount = *tso.MinAmount
+				}
+				maxAmount := 8000000000
+				if tso.MaxAmount != nil {
+					maxAmount = *tso.MaxAmount
+				}
+				tc = newTransactionSimulatorWorker(pr, id, test.ActionsPerLoop, &TransactionSimulatorConfig{
+					From:      fmt.Sprintf("%s%d", tso.PartyNamePrefix, fromPartyIndex),
+					To:        fmt.Sprintf("%s%d", tso.PartyNamePrefix, toPartyIndex),
+					MinAmount: minAmount,
+					MaxAmount: maxAmount,
+					DryRun:    tso.DryRun,
+				})
 			case conf.PerfTestCustomFabricContract:
 				tc = newCustomFabricTestWorker(pr, id, test.ActionsPerLoop)
 			case conf.PerfTestBlobBroadcast:

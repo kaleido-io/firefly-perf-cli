@@ -1,0 +1,27 @@
+wsConfig:
+  wsPath: endpoint/perf-test/besu-ns/rest/ws
+  readBufferSize: 16000
+  writeBufferSize: 16000
+  initialDelay: 250ms
+  maximumDelay: 1s
+  initialConnectAttempts: 5
+  heartbeatInterval: 5s
+  disableTLSVerification: true
+  connectionTimeout: 5s
+nodes:
+  - name: long-run-node
+    apiEndpoint: https://test.highway.perf.dev.labs.kaleidocon.com/
+    authUsername: perf-test
+    authPassword: xxxxxxx
+instances:
+  - name: ts
+    tests:
+      - name: transaction_simulator
+        workers: 2000
+        actionsPerLoop: 1
+        customOptions: '{"partiesCount": 12, "partyNamePrefix": "bank-", "dryRun": true}'
+    maxTimePerAction: 60s
+    noWaitSubmission: false
+    delinquentAction: log
+    length: 1m
+    rampLength: 30s

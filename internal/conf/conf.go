@@ -90,9 +90,10 @@ type InstanceConfig struct {
 }
 
 type TestCaseConfig struct {
-	Name           fftypes.FFEnum `json:"name" yaml:"name"`
-	Workers        int            `json:"workers" yaml:"workers"`
-	ActionsPerLoop int            `json:"actionsPerLoop" yaml:"actionsPerLoop"`
+	Name           fftypes.FFEnum   `json:"name" yaml:"name"`
+	Workers        int              `json:"workers" yaml:"workers"`
+	ActionsPerLoop int              `json:"actionsPerLoop" yaml:"actionsPerLoop"`
+	CustomOptions  *fftypes.JSONAny `json:"customOptions" yaml:"customOptions"`
 }
 
 type NodeConfig struct {
@@ -183,6 +184,8 @@ var (
 	PerfTestTokenMint fftypes.FFEnum = "token_mint"
 	// PerfTestCustomEthereumContract invokes a custom smart contract and checks events emitted by it
 	PerfTestCustomEthereumContract fftypes.FFEnum = "custom_ethereum_contract"
+	// PerfTestTransactionSimulator generates transactions between a defined set of parties with random transfer amounts
+	PerfTestTransactionSimulator fftypes.FFEnum = "transaction_simulator"
 	// PerfTestCustomFabricContract invokes a custom smart contract and checks events emitted by it
 	PerfTestCustomFabricContract fftypes.FFEnum = "custom_fabric_contract"
 	// PerfTestBlobBroadcast broadcasts a blob
