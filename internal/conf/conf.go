@@ -90,9 +90,10 @@ type InstanceConfig struct {
 }
 
 type TestCaseConfig struct {
-	Name           fftypes.FFEnum `json:"name" yaml:"name"`
-	Workers        int            `json:"workers" yaml:"workers"`
-	ActionsPerLoop int            `json:"actionsPerLoop" yaml:"actionsPerLoop"`
+	Name                fftypes.FFEnum `json:"name" yaml:"name"`
+	Workers             int            `json:"workers" yaml:"workers"`
+	TargetTotalSendRate *int           `json:"targetTotalSendRate,omitempty" yaml:"targetTotalSendRate,omitempty"`
+	ActionsPerLoop      int            `json:"actionsPerLoop" yaml:"actionsPerLoop"`
 }
 
 type NodeConfig struct {

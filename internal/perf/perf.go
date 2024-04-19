@@ -190,6 +190,7 @@ type perfRunner struct {
 	daemon                  bool
 	sender                  string
 	totalWorkers            int
+	targetTotalSendRate     int
 }
 
 type SubscriptionInfo struct {
@@ -208,8 +209,11 @@ func New(config *conf.RunnerConfig, reportBuilder *util.Report) PerfRunner {
 	poolName := fmt.Sprintf("pool-%s", fftypes.NewUUID())
 
 	totalWorkers := 0
+	targetTotalSendRate := 0
+
 	for _, test := range config.Tests {
 		totalWorkers += test.Workers
+		targetTotalSendRate += *test.TargetTotalSendRate
 	}
 
 	// Create channel based dispatch for workers
@@ -227,30 +231,31 @@ func New(config *conf.RunnerConfig, reportBuilder *util.Report) PerfRunner {
 	endTime := startTime + int64(config.Length.Seconds())
 
 	pr := &perfRunner{
-		bfr:               make(chan int, totalWorkers),
-		cfg:               config,
-		ctx:               ctx,
-		shutdown:          cancel,
-		startRampTime:     startRampTime,
-		endRampTime:       endRampTime,
-		startTime:         startTime,
-		endTime:           endTime,
-		poolName:          poolName,
-		reportBuilder:     reportBuilder,
-		sendTime:          &util.Latency{},
-		receiveTime:       &util.Latency{},
-		totalTime:         &util.Latency{},
-		poolConnectorName: config.TokenOptions.TokenPoolConnectorName,
-		tagPrefix:         fmt.Sprintf("perf_%s", wsUUID.String()),
-		msgTimeMap:        make(map[string]*inflightTest),
-		totalSummary:      0,
-		wsReceivers:       wsReceivers,
-		wsUUID:            wsUUID,
-		nodeURLs:          config.NodeURLs,
-		subscriptionMap:   make(map[string]SubscriptionInfo),
-		daemon:            config.Daemon,
-		sender:            config.SenderURL,
-		totalWorkers:      totalWorkers,
+		bfr:                 make(chan int, targetTotalSendRate),
+		cfg:                 config,
+		ctx:                 ctx,
+		shutdown:            cancel,
+		startRampTime:       startRampTime,
+		endRampTime:         endRampTime,
+		startTime:           startTime,
+		endTime:             endTime,
+		poolName:            poolName,
+		reportBuilder:       reportBuilder,
+		sendTime:            &util.Latency{},
+		receiveTime:         &util.Latency{},
+		totalTime:           &util.Latency{},
+		poolConnectorName:   config.TokenOptions.TokenPoolConnectorName,
+		tagPrefix:           fmt.Sprintf("perf_%s", wsUUID.String()),
+		msgTimeMap:          make(map[string]*inflightTest),
+		totalSummary:        0,
+		wsReceivers:         wsReceivers,
+		wsUUID:              wsUUID,
+		nodeURLs:            config.NodeURLs,
+		subscriptionMap:     make(map[string]SubscriptionInfo),
+		daemon:              config.Daemon,
+		sender:              config.SenderURL,
+		totalWorkers:        totalWorkers,
+		targetTotalSendRate: targetTotalSendRate,
 	}
 
 	wsconns := make([]wsclient.WSClient, len(config.NodeURLs))
@@ -490,17 +495,23 @@ perfLoop:
 			break perfLoop
 		}
 
+		sTicker := time.NewTicker(1 * time.Second)
+
 		select {
 		case <-signalCh:
 			break perfLoop
-		case pr.bfr <- i:
-			i++
+		case <-sTicker.C:
+			for j := 0; j < pr.targetTotalSendRate; j++ {
+				pr.bfr <- j
+			}
+
 			if time.Since(lastCheckedTime).Seconds() > pr.cfg.MaxTimePerAction.Seconds() {
 				if pr.detectDelinquentMsgs() && pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
 					break perfLoop
 				}
 				lastCheckedTime = time.Now()
 			}
+			i++
 			break
 		case <-timeout:
 			if pr.detectDelinquentMsgs() && pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {

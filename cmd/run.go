@@ -272,6 +272,9 @@ func setDefaults(runnerConfig *conf.RunnerConfig) {
 		if runnerConfig.Tests[i].ActionsPerLoop <= 0 {
 			runnerConfig.Tests[i].ActionsPerLoop = 1
 		}
+		if runnerConfig.Tests[i].TargetTotalSendRate == nil {
+			runnerConfig.Tests[i].TargetTotalSendRate = &runnerConfig.Tests[i].Workers
+		}
 	}
 }
 
