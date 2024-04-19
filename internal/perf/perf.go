@@ -779,6 +779,9 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 	for {
 		select {
 		case <-pr.bfr:
+			if pr.stopping {
+				return nil
+			}
 			var confirmationsPerAction int
 			var actionsCompleted int
 
