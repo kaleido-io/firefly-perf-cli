@@ -17,10 +17,9 @@
 package perf
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/hyperledger/firefly-perf-cli/internal/conf"
 	log "github.com/sirupsen/logrus"
@@ -50,46 +49,31 @@ func (tc *customEthereum) IDType() TrackingIDType {
 	return TrackingIDTypeWorkerNumber
 }
 
+type submitResponse struct {
+	Result string `json:"result"`
+}
+
 func (tc *customEthereum) RunOnce(iterationCount int) (string, error) {
 	idempotencyKey := tc.pr.getIdempotencyKey(tc.workerID, iterationCount)
-	invokeOptionsJSON := ""
-	if tc.pr.cfg.InvokeOptions != nil {
-		b, err := json.Marshal(tc.pr.cfg.InvokeOptions)
-		if err == nil {
-			invokeOptionsJSON = fmt.Sprintf(",\n		 \"options\": %s", b)
-		}
-	}
+	// TODO AM: the abi reference should come from the config too
 	payload := fmt.Sprintf(`{
-		"location": {
-			"address": "%s"
-		},
-		"method": {
-			"name": "set",
-			"params": [
-				{
-					"name": "newValue",
-					"schema": {
-						"type": "integer",
-						"details": {
-							"type": "uint256"
-						}
-					}
-				}
-			],
-			"returns": []
-		},
-		"input": {
-			"newValue": %v
-		},
-		"key": "%s",
-		"idempotencyKey": "%s"%s
-	}`, tc.pr.cfg.ContractOptions.Address, tc.workerID, tc.pr.cfg.SigningKey, idempotencyKey, invokeOptionsJSON)
-	var resContractCall map[string]interface{}
+		"jsonrpc": "2.0",
+		"id": "1",
+		"method": "ptx_sendTransaction",
+		"params": [
+			{
+				"type": "public",
+				"abiReference": "0x23dbc09b901a3bf265a44b60ca7337eeba63f506ddd8ed77ac1505a52a2c5d15",
+				"function": "set",
+				"to": "%s",
+				"from": "anna@node1",
+				"data": [%v],
+				"idempotencyKey": "%s"
+			}
+		]
+	}`, tc.pr.cfg.ContractOptions.Address, tc.workerID, idempotencyKey)
+	var resContractCall submitResponse
 	var resError fftypes.RESTError
-	fullPath, err := url.JoinPath(tc.pr.client.BaseURL, tc.pr.cfg.FFNamespacePath, "contracts/invoke")
-	if err != nil {
-		return "", err
-	}
 	res, err := tc.pr.client.R().
 		SetHeaders(map[string]string{
 			"Accept":       "application/json",
@@ -98,13 +82,14 @@ func (tc *customEthereum) RunOnce(iterationCount int) (string, error) {
 		SetBody([]byte(payload)).
 		SetResult(&resContractCall).
 		SetError(&resError).
-		Post(fullPath)
+		Post(tc.pr.client.BaseURL)
 	if err != nil || res.IsError() {
 		if res.StatusCode() == 409 {
-			log.Warnf("Request already received by FireFly: %+v", &resError)
+			log.Warnf("Request already received by Paladin: %+v", &resError)
 		} else {
 			return "", fmt.Errorf("Error invoking contract [%d]: %s (%+v)", resStatus(res), err, &resError)
 		}
 	}
+	tc.pr.txIDMap.Store(resContractCall.Result, time.Now())
 	return strconv.Itoa(tc.workerID), nil
 }

@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -36,18 +35,14 @@ import (
 
 	"github.com/go-resty/resty/v2"
 	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/wsclient"
 	"github.com/hyperledger/firefly-perf-cli/internal/conf"
 	"github.com/hyperledger/firefly-perf-cli/internal/util"
-	"github.com/hyperledger/firefly/pkg/core"
 	dto "github.com/prometheus/client_model/go"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
 
 const workerPrefix = "worker-"
-const preparePrefix = "prep-"
 
 var mutex = &sync.Mutex{}
 var TRANSPORT_TYPE = "websockets"
@@ -61,39 +56,15 @@ var totalActionsCounter = prometheus.NewGauge(prometheus.GaugeOpts{
 	Subsystem: METRICS_SUBSYSTEM,
 })
 
-var sentMintsCounter = prometheus.NewGauge(prometheus.GaugeOpts{
+var failedTransactionsCounter = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: METRICS_NAMESPACE,
-	Name:      "sent_mints_total",
-	Subsystem: METRICS_SUBSYSTEM,
-})
-
-var sentMintErrorCounter = prometheus.NewGauge(prometheus.GaugeOpts{
-	Namespace: METRICS_NAMESPACE,
-	Name:      "sent_mint_errors_total",
-	Subsystem: METRICS_SUBSYSTEM,
-})
-
-var mintBalanceGauge = prometheus.NewGauge(prometheus.GaugeOpts{
-	Namespace: METRICS_NAMESPACE,
-	Name:      "mint_token_balance",
+	Name:      "transactions_failed_total",
 	Subsystem: METRICS_SUBSYSTEM,
 })
 
 var receivedEventsCounter = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: METRICS_NAMESPACE,
 	Name:      "received_events_total",
-	Subsystem: METRICS_SUBSYSTEM,
-})
-
-var incompleteEventsCounter = prometheus.NewGauge(prometheus.GaugeOpts{
-	Namespace: METRICS_NAMESPACE,
-	Name:      "incomplete_events_total",
-	Subsystem: METRICS_SUBSYSTEM,
-})
-
-var delinquentMsgsCounter = prometheus.NewGauge(prometheus.GaugeOpts{
-	Namespace: METRICS_NAMESPACE,
-	Name:      "deliquent_msgs_total",
 	Subsystem: METRICS_SUBSYSTEM,
 })
 
@@ -105,14 +76,10 @@ var perfTestDurationHistogram = prometheus.NewHistogramVec(prometheus.HistogramO
 }, []string{"test"})
 
 func Init() {
-	prometheus.Register(delinquentMsgsCounter)
-	prometheus.Register(sentMintsCounter)
-	prometheus.Register(sentMintErrorCounter)
-	prometheus.Register(mintBalanceGauge)
 	prometheus.Register(receivedEventsCounter)
-	prometheus.Register(incompleteEventsCounter)
 	prometheus.Register(totalActionsCounter)
 	prometheus.Register(perfTestDurationHistogram)
+	prometheus.Register(failedTransactionsCounter)
 }
 
 func getMetricVal(collector prometheus.Collector) float64 {
@@ -121,7 +88,7 @@ func getMetricVal(collector prometheus.Collector) float64 {
 	metric := dto.Metric{}
 	err := (<-collectorChannel).Write(&metric)
 	if err != nil {
-		log.Error("error writing metric: %s", err)
+		log.Errorf("error writing metric: %s", err)
 	}
 	if metric.Counter != nil {
 		return *metric.Counter.Value
@@ -157,8 +124,6 @@ type inflightTest struct {
 	testCase TestCase
 }
 
-var mintStartingBalance int
-
 type summary struct {
 	mutex        *sync.Mutex
 	rampSummary  int64
@@ -185,26 +150,14 @@ type perfRunner struct {
 	summary       summary
 	msgTimeMap    sync.Map
 
-	poolName                   string
-	poolConnectorName          string
-	tagPrefix                  string
-	wsconns                    []wsclient.WSClient
-	wsReceivers                map[string]chan string
+	pollingTickers             map[string]*time.Ticker
+	completedTransactions      map[string]chan string
 	eventPrefixForCurrentStage string
-	wsUUID                     fftypes.UUID
 	nodeURLs                   []string
-	subscriptionMap            map[string]SubscriptionInfo
-	listenerIDsForNodes        map[string][]string
-	subscriptionIDsForNodes    map[string][]string
 	daemon                     bool
 	sender                     string
 	totalWorkers               int
-}
-
-type SubscriptionInfo struct {
-	NodeURL string
-	Name    string
-	Job     fftypes.FFEnum
+	txIDMap                    sync.Map
 }
 
 func New(config *conf.RunnerConfig, reportBuilder *util.Report) PerfRunner {
@@ -214,21 +167,18 @@ func New(config *conf.RunnerConfig, reportBuilder *util.Report) PerfRunner {
 		}
 	}
 
-	poolName := fmt.Sprintf("pool-%s", fftypes.NewUUID())
-
 	totalWorkers := 0
 	for _, test := range config.Tests {
 		totalWorkers += test.Workers
 	}
 
 	// Create channel based dispatch for workers
-	wsReceivers := make(map[string]chan string)
+	completedTransactions := make(map[string]chan string)
 	for i := 0; i < totalWorkers; i++ {
 		preFixedWorkerID := fmt.Sprintf("%s%d", workerPrefix, i)
-		wsReceivers[preFixedWorkerID] = make(chan string)
+		completedTransactions[preFixedWorkerID] = make(chan string)
 	}
 
-	wsUUID := *fftypes.NewUUID()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	startRampTime := time.Now().Unix()
@@ -237,59 +187,36 @@ func New(config *conf.RunnerConfig, reportBuilder *util.Report) PerfRunner {
 	endTime := startTime + int64(config.Length.Seconds())
 
 	pr := &perfRunner{
-		bfr:               make(chan int, totalWorkers),
-		cfg:               config,
-		ctx:               ctx,
-		shutdown:          cancel,
-		startRampTime:     startRampTime,
-		endRampTime:       endRampTime,
-		startTime:         startTime,
-		endTime:           endTime,
-		poolName:          poolName,
-		reportBuilder:     reportBuilder,
-		sendTime:          &util.Latency{},
-		receiveTime:       &util.Latency{},
-		totalTime:         &util.Latency{},
-		poolConnectorName: config.TokenOptions.TokenPoolConnectorName,
-		tagPrefix:         fmt.Sprintf("perf_%s", wsUUID.String()),
-		msgTimeMap:        sync.Map{},
+		bfr:           make(chan int, totalWorkers),
+		cfg:           config,
+		ctx:           ctx,
+		shutdown:      cancel,
+		startRampTime: startRampTime,
+		endRampTime:   endRampTime,
+		startTime:     startTime,
+		endTime:       endTime,
+		reportBuilder: reportBuilder,
+		sendTime:      &util.Latency{},
+		receiveTime:   &util.Latency{},
+		totalTime:     &util.Latency{},
+		msgTimeMap:    sync.Map{},
 		summary: summary{
 			totalSummary: 0,
 			mutex:        &sync.Mutex{},
 		},
-		wsReceivers:                wsReceivers,
+		completedTransactions:      completedTransactions,
 		eventPrefixForCurrentStage: workerPrefix, // most test case currently doesn't have a prep stage, so default to test running stage prefix
-		wsUUID:                     wsUUID,
 		nodeURLs:                   config.NodeURLs,
-		subscriptionMap:            make(map[string]SubscriptionInfo),
 		daemon:                     config.Daemon,
 		sender:                     config.SenderURL,
 		totalWorkers:               totalWorkers,
+		txIDMap:                    sync.Map{},
 	}
-
-	wsconns := make([]wsclient.WSClient, len(config.NodeURLs))
-
-	for i, nodeURL := range config.NodeURLs {
-		// Create websocket client
-		wsConfig := conf.GenerateWSConfig(nodeURL, &config.WebSocket)
-		wsconn, err := wsclient.New(context.Background(), wsConfig, nil, pr.startSubscriptions)
-		if err != nil {
-			log.Errorf("Could not create websocket connection: %s", err)
-		}
-		wsconns[i] = wsconn
-	}
-
-	pr.wsconns = wsconns
 	return pr
 }
 
 func (pr *perfRunner) Init() (err error) {
-	pr.client = getFFClient(pr.sender)
-	if pr.cfg.WebSocket.AuthToken != "" {
-		pr.client.Header.Set("Authorization", fmt.Sprintf("Bearer %s", pr.cfg.WebSocket.AuthToken))
-	} else {
-		pr.client.SetBasicAuth(pr.cfg.WebSocket.AuthUsername, pr.cfg.WebSocket.AuthPassword)
-	}
+	pr.client = getPaladinClient(pr.sender)
 	pr.client.
 		SetRetryCount(10).
 		// You can override initial retry wait time.
@@ -318,204 +245,26 @@ func (pr *perfRunner) Init() (err error) {
 }
 
 func (pr *perfRunner) Start() (err error) {
-	// Create token pool, if needed
-	if containsTargetTest(pr.cfg.Tests, conf.PerfTestTokenMint) {
-		if pr.cfg.TokenOptions.ExistingPoolName == "" {
-			err = pr.CreateTokenPool()
-			if err != nil {
-				return err
-			}
-		} else {
-			pr.poolName = pr.cfg.TokenOptions.ExistingPoolName
-		}
-	}
-	prepEventTrackingID := ""
-
 	log.Infof("Running test:\n%+v", pr.cfg)
-	pr.listenerIDsForNodes = make(map[string][]string)
-	pr.subscriptionIDsForNodes = make(map[string][]string)
+
+	pr.pollingTickers = make(map[string]*time.Ticker)
+
 	for _, nodeURL := range pr.nodeURLs {
-		pr.listenerIDsForNodes[nodeURL] = []string{}
-		pr.subscriptionIDsForNodes[nodeURL] = []string{}
-
-		if containsTargetTest(pr.cfg.Tests, conf.PerfTestTokenMint) {
-			subID, subName, err := pr.createTokenMintSub(nodeURL)
-			if err != nil {
-				return err
-			}
-			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
-				Name:    subName,
-				Job:     conf.PerfTestTokenMint,
-			}
-
-			// Create subscription for message confirmations if supportsData == true
-			if pr.cfg.TokenOptions.SupportsData == nil || *pr.cfg.TokenOptions.SupportsData {
-				log.Infof("Creating message subscription for data in token mints")
-				subID, subName, err = pr.createMsgConfirmSub(nodeURL, pr.tagPrefix, fmt.Sprintf("^%s_", pr.tagPrefix))
-				if err != nil {
-					return err
-				}
-				pr.subscriptionMap[subID] = SubscriptionInfo{
-					NodeURL: nodeURL,
-					Name:    subName,
-					Job:     conf.PerfTestBroadcast,
-				}
-			}
-
-			if pr.cfg.TokenOptions.MaxTokenBalanceWait.Seconds() > 0 {
-				mintStartingBalance, err = pr.getMintRecipientBalance()
-
-				if err != nil {
-					return err
-				}
-			}
-		}
-
-		// Create contract sub and listener, if needed
-		var listenerID string
-		if containsTargetTest(pr.cfg.Tests, conf.PerfTestCustomEthereumContract) {
-			listenerID, err = pr.createEthereumContractListener(nodeURL)
-			if err != nil {
-				return err
-			}
-			subID, subName, err := pr.createContractsSub(nodeURL, listenerID)
-			if err != nil {
-				return err
-			}
-			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
-				Name:    subName,
-				Job:     conf.PerfTestCustomEthereumContract,
-			}
-		}
-
-		if containsTargetTest(pr.cfg.Tests, conf.PerfTestERC20TransferContract) {
-			pr.eventPrefixForCurrentStage = preparePrefix
-			assumedTokenCountPerSecond := 0
-			for _, testConf := range pr.cfg.Tests {
-				assumedTokenCountPerSecond += testConf.ActionsPerLoop * ((1 + testConf.Workers) * testConf.Workers / 2)
-				if pr.cfg.MaxSubmissionsPerSecond > testConf.Workers {
-					assumedTokenCountPerSecond = assumedTokenCountPerSecond * ((pr.cfg.MaxSubmissionsPerSecond / testConf.Workers) + 1)
-				}
-				// if we over pre-mint it doesn't matter.
-			}
-
-			assumedTotalTokenRequired := (assumedTokenCountPerSecond * int(pr.cfg.Length.Seconds()) * 120 /*allow 20% extra*/) / 100
-
-			listenerID, err = pr.createERC20ContractListener(nodeURL)
-			if err != nil {
-				return err
-			}
-			subID, subName, err := pr.createContractsSub(nodeURL, listenerID)
-			if err != nil {
-				return err
-			}
-			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
-				Name:    subName,
-				Job:     conf.PerfTestERC20TransferContract,
-			}
-			err = pr.premintERC20Tokens(nodeURL, pr.cfg.ContractOptions.Address, pr.cfg.SigningKey, assumedTotalTokenRequired)
-			if err != nil {
-				return err
-			}
-			prepEventTrackingID = fmt.Sprintf("%s%d", pr.eventPrefixForCurrentStage, assumedTotalTokenRequired)
-			pr.wsReceivers[prepEventTrackingID] = make(chan string)
-
-		}
-
-		if containsTargetTest(pr.cfg.Tests, conf.PerfTestCustomFabricContract) {
-			listenerID, err = pr.createFabricContractListener(nodeURL)
-			if err != nil {
-				return err
-			}
-			subID, subName, err := pr.createContractsSub(nodeURL, listenerID)
-
-			if err != nil {
-				return err
-			}
-			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
-				Name:    subName,
-				Job:     conf.PerfTestCustomFabricContract,
-			}
-		}
-
-		if containsTargetTest(pr.cfg.Tests, conf.PerfTestBroadcast) {
-			// Create subscription for message confirmations
-			subID, subName, err := pr.createMsgConfirmSub(nodeURL, pr.tagPrefix, fmt.Sprintf("^%s_", pr.tagPrefix))
-			if err != nil {
-				return err
-			}
-			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
-				Name:    subName,
-				Job:     conf.PerfTestBroadcast,
-			}
-		}
-
-		if containsTargetTest(pr.cfg.Tests, conf.PerfTestBlobBroadcast) {
-			// Create subscription for blob message confirmations
-			subID, subName, err := pr.createMsgConfirmSub(nodeURL, fmt.Sprintf("blob_%s", pr.tagPrefix), fmt.Sprintf("^blob_%s_", pr.tagPrefix))
-			if err != nil {
-				return err
-			}
-			pr.subscriptionMap[subID] = SubscriptionInfo{
-				NodeURL: nodeURL,
-				Name:    subName,
-				Job:     conf.PerfTestBlobBroadcast,
-			}
-		}
-	}
-
-	// Open websocket clients for all subscriptions
-	for i, wsconn := range pr.wsconns {
-		err = pr.openWsClient(wsconn)
-		if err != nil {
-			return err
-		}
-		if pr.cfg.SubscriptionCoreOptions != nil && pr.cfg.SubscriptionCoreOptions.Batch != nil && *pr.cfg.SubscriptionCoreOptions.Batch {
-			go pr.batchEventLoop(pr.nodeURLs[i], wsconn)
-		} else {
-			go pr.eventLoop(pr.nodeURLs[i], wsconn)
-		}
-	}
-
-	if prepEventTrackingID != "" {
-		log.Infof("Waiting for tracking %s", prepEventTrackingID)
-		<-pr.wsReceivers[prepEventTrackingID]
-		log.Infof("Prep action completed")
-		pr.eventPrefixForCurrentStage = workerPrefix
+		go func(nodeURL string) {
+			pr.pollingLoop(nodeURL)
+		}(nodeURL)
+		// TODO AM: this wouldn't actually work properly if there was more than one node
+		// but I don't think we really need to support multiple nodes for this test
+		go func(nodeURL string) {
+			pr.findLostTransactions(nodeURL)
+		}(nodeURL)
 	}
 
 	id := 0
 	for _, test := range pr.cfg.Tests {
 		log.Infof("Starting %d workers for case \"%s\"", test.Workers, test.Name)
 		for iWorker := 0; iWorker < test.Workers; iWorker++ {
-			var tc TestCase
-
-			switch test.Name {
-			case conf.PerfTestBroadcast:
-				tc = newBroadcastTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestPrivateMsg:
-				tc = newPrivateTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestTokenMint:
-				tc = newTokenMintTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestCustomEthereumContract:
-				tc = newCustomEthereumTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestERC20TransferContract:
-				tc = newERC20TransferTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestCustomFabricContract:
-				tc = newCustomFabricTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestBlobBroadcast:
-				tc = newBlobBroadcastTestWorker(pr, id, test.ActionsPerLoop)
-			case conf.PerfTestBlobPrivateMsg:
-				tc = newBlobPrivateTestWorker(pr, id, test.ActionsPerLoop)
-			default:
-				return fmt.Errorf("unknown test case '%s'", test.Name)
-			}
-
+			var tc TestCase = newCustomEthereumTestWorker(pr, id, test.ActionsPerLoop)
 			delayPerWorker := pr.cfg.RampLength / time.Duration(test.Workers)
 
 			go func(i int) {
@@ -535,10 +284,10 @@ func (pr *perfRunner) Start() (err error) {
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt)
-	signal.Notify(signalCh, os.Kill)
+	// signal.Notify(signalCh, os.Kill)
 	signal.Notify(signalCh, syscall.SIGTERM)
 	signal.Notify(signalCh, syscall.SIGQUIT)
-	signal.Notify(signalCh, syscall.SIGKILL)
+	// signal.Notify(signalCh, syscall.SIGKILL)
 
 	i := 0
 	lastCheckedTime := time.Now()
@@ -580,13 +329,6 @@ perfLoop:
 			lastCheckedTime = time.Now()
 		}
 
-	}
-
-	// If configured, check that the balance of the mint recipient address is correct
-	if pr.detectDelinquentBalance() {
-		if pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
-			log.Panic(fmt.Errorf("token mint recipient balance didn't reach the expected value in the allowed time"))
-		}
 	}
 
 	pr.stopping = true
@@ -654,12 +396,8 @@ perfLoop:
 	pr.cleanup()
 
 	log.Info("Shutdown summary:")
-	log.Infof(" - Prometheus metric sent_mints_total        = %f\n", getMetricVal(sentMintsCounter))
-	log.Infof(" - Prometheus metric sent_mint_errors_total  = %f\n", getMetricVal(sentMintErrorCounter))
-	log.Infof(" - Prometheus metric mint_token_balance      = %f\n", getMetricVal(mintBalanceGauge))
 	log.Infof(" - Prometheus metric received_events_total   = %f\n", getMetricVal(receivedEventsCounter))
-	log.Infof(" - Prometheus metric incomplete_events_total = %f\n", getMetricVal(incompleteEventsCounter))
-	log.Infof(" - Prometheus metric delinquent_msgs_total    = %f\n", getMetricVal(delinquentMsgsCounter))
+	log.Infof(" - Prometheus metric failed_transactions_total = %f\n", getMetricVal(failedTransactionsCounter))
 	log.Infof(" - Prometheus metric actions_submitted_total = %f\n", getMetricVal(totalActionsCounter))
 	log.Infof(" - Test duration: %s", measuredTime)
 	log.Infof(" - Measured actions: %d", measuredActions)
@@ -676,257 +414,107 @@ perfLoop:
 
 func (pr *perfRunner) cleanup() {
 	for _, nodeURL := range pr.nodeURLs {
-		subIDs := pr.subscriptionIDsForNodes[nodeURL]
-		lIDs := pr.listenerIDsForNodes[nodeURL]
-
-		for _, subID := range subIDs {
-			err := pr.deleteSubscription(nodeURL, subID)
-			if err != nil {
-				log.Warnf("failed to delete subscription with ID %s for node URL %s due to %s\n", subID, nodeURL, err.Error())
-			} else {
-				log.Infof("successfully deleted subscription with ID %s for node URL %s\n", subID, nodeURL)
-			}
-		}
-
-		for _, lID := range lIDs {
-			err := pr.deleteContractListener(nodeURL, lID)
-			if err != nil {
-				fmt.Printf("failed to delete listener with ID %s for node URL %s due to %s\n", lID, nodeURL, err.Error())
-			} else {
-				log.Infof("successfully deleted listener with ID %s for node URL %s\n", lID, nodeURL)
-			}
-		}
+		pr.pollingTickers[nodeURL].Stop()
 	}
-
 }
 
-func (pr *perfRunner) filterEvent(event core.EventDelivery, url string) (workerID int, err error) {
-	workerID = -1
-
-	switch event.Type {
-	case core.EventTypeBlockchainEventReceived:
-		if event.BlockchainEvent == nil {
-			log.Errorf("\nBlockchain event not found --- Event ID: %s\n\t%d --- Ref: %s", event.ID.String(), event.Reference)
-			return workerID, fmt.Errorf("blockchain event not found for event: %s", event.ID)
-		}
-		var value string
-		switch event.BlockchainEvent.Source {
-		case "ethereum":
-			value = event.BlockchainEvent.Output.GetString("value")
-		case "fabric":
-			value = event.BlockchainEvent.Output.GetString("Owner")
-		}
-		workerID, err = strconv.Atoi(value)
-		if err != nil {
-			log.Errorf("Could not extract worker ID from event value: %s due to %+v", value, err)
-			b, _ := json.Marshal(&event)
-			log.Debugf("Full event: %s", b)
-		} else {
-			log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, url, workerID, event.ID.String(), workerID, event.Reference)
-		}
-	case core.EventTypeTransferConfirmed:
-		if pr.cfg.TokenOptions.SupportsURI {
-			// If there's a URI in the event we'll have put the worker ID there
-			uriElements := strings.Split(event.TokenTransfer.URI, "//")
-			if len(uriElements) == 2 {
-				workerID, err = strconv.Atoi(uriElements[1])
-				if err != nil {
-					log.Errorf("Could not extract worker ID from uri: %s due to %+v", uriElements[1], err)
-					b, _ := json.Marshal(&event)
-					log.Debugf("Full event: %s", b)
-				} else {
-					log.Infof("\n\t%d - Received from %s\n\t%d --- Event ID: %s\n\t%d --- Ref: %s", workerID, url, workerID, event.ID.String(), workerID, event.Reference)
-				}
-			} else {
-				log.Errorf("no URI in token transfer event: %s")
-				b, _ := json.Marshal(&event)
-				log.Errorf("Full event: %s", b)
-
-				incompleteEventsCounter.Inc()
-
-				if pr.cfg.DelinquentAction == conf.DelinquentActionExit.String() {
-					log.Panic(fmt.Errorf("error - no URI found in token_transfer_confirmed event"))
-				}
-			}
-		}
-	default:
-		workerIDFromTag := ""
-
-		if event.Type.String() == "protocol_error" {
-			// Can't do anything but shut down gracefully
-			log.Error("Protocol error event - shutting down")
-			pr.shutdown()
-		} else {
-			subInfo, ok := pr.subscriptionMap[event.Subscription.ID.String()]
-			if !ok {
-				return workerID, fmt.Errorf("received an event on unknown subscription: %s", event.Subscription.ID)
-			}
-			switch subInfo.Job {
-			case conf.PerfTestBlobBroadcast, conf.PerfTestBlobPrivateMsg:
-				workerIDFromTag = strings.ReplaceAll(event.Message.Header.Tag, fmt.Sprintf("blob_%s_", pr.tagPrefix), "")
-			default:
-				workerIDFromTag = strings.ReplaceAll(event.Message.Header.Tag, pr.tagPrefix+"_", "")
-			}
-
-			workerID, err = strconv.Atoi(workerIDFromTag)
-			if err != nil {
-				log.Errorf("Could not extract worker ID from message tag: %s due to %+v", workerIDFromTag, err)
-				b, _ := json.Marshal(&event)
-				log.Debugf("Full event: %s", b)
-			}
-
-			var dataID *fftypes.UUID
-			if len(event.Message.Data) > 0 {
-				dataID = event.Message.Data[0].ID
-			}
-			log.Infof("\n\t%d - Received %s \n\t%d --- Event ID: %s\n\t%d --- Message ID: %s\n\t%d --- Data ID: %s", workerID, url, workerID, event.ID.String(), workerID, event.Message.Header.ID.String(), workerID, dataID)
-		}
-	}
-
-	return workerID, nil
+// TODO AM: do we actually need the tags?
+type transaction struct {
+	ID             string `json:"id"`
+	IdempotencyKey string `json:"idempotencyKey"`
+	Public         []struct {
+		Success     *bool  `json:"success,omitempty"`
+		CompletedAt string `json:"completedAt"`
+	} `json:"public,omitempty"`
 }
 
-func (pr *perfRunner) batchEventLoop(nodeURL string, wsconn wsclient.WSClient) (err error) {
-	log.Infof("Batch Event loop started for %s...", nodeURL)
+type queryTransactionsResponse struct {
+	Result []transaction
+}
+
+type getTransactionResponse struct {
+	Result transaction
+}
+
+func (pr *perfRunner) pollingLoop(nodeURL string) {
+	log.Infof("Polling loop started for %s...", nodeURL)
+	// last completed time - needs to be a string - set to the current time - as long as this is before submission starts
+	// the milliseconds all end up as zeros but this is accurate enough to avoid picking up transactions from previous test runs
+	lastCompletedTime := time.Now().Format("2006-1-2T15:04:05.000000000Z")
+	client := getPaladinClient(nodeURL)
+	ticker := time.NewTicker(3 * time.Second) // TODO AM: make this configurable
+	pr.pollingTickers[nodeURL] = ticker
 	for {
-		log.Trace("blocking until wsconn.Receive or ctx.Done()")
 		select {
-		// Wait to receive websocket event
-		case msgBytes, ok := <-wsconn.Receive():
-			if !ok {
-				log.Errorf("Error receiving websocket")
-				return
-			}
-			log.Trace("received from websocket")
-
-			// Handle websocket event
-			var batch core.WSEventBatch
-			json.Unmarshal(msgBytes, &batch)
-
-			if pr.cfg.LogEvents {
-				log.Info("Batch: ", string(msgBytes))
-			}
-
-			g, _ := errgroup.WithContext(pr.ctx)
-			g.SetLimit(-1)
-
-			for _, event := range batch.Events {
-				thisEvent := event
-				g.Go(func() error {
-					if pr.cfg.LogEvents {
-						eventJSON, _ := json.Marshal(thisEvent)
-						log.Info("Event: ", string(eventJSON))
+		case <-ticker.C:
+			// query transactions since the last completed time - sorted by created time
+			// if completed
+			// get the worker id from the idempotency key
+			// put a message on the correct worker channel
+			payload := fmt.Sprintf(`{
+				"jsonrpc": "2.0",
+				"id": "1",
+				"method": "ptx_queryTransactionsFull",
+				"params": [
+					{
+						"limit": 1000,
+						"gt": [
+							{
+								"field": "created",
+								"value": "%s"
+							}
+						],
+						"sort": [
+							"created ASC"
+						]
 					}
+				]
+			}`, lastCompletedTime)
+			var response queryTransactionsResponse
+			var resError string
+			res, err := client.R().
+				SetHeaders(map[string]string{
+					"Accept":       "application/json",
+					"Content-Type": "application/json",
+				}).
+				SetBody([]byte(payload)).
+				SetResult(&response).
+				SetError(resError).
+				Post("/")
+			if err != nil || res.IsError() {
+				log.Errorf("Error querying transactions")
+				break // don't exit- let it try again on the next turn
+			}
+			// assume transactions were all submitted in their created order so if we find one that hasn't errored/completed
+			// there's no point in looking at the next ones
+			log.Debugf("New transactions %d", len(response.Result))
+			for _, transaction := range response.Result {
+				if len(transaction.Public) == 0 || transaction.Public[0].Success == nil {
+					break
+				}
 
+				if _, ok := pr.txIDMap.LoadAndDelete(transaction.ID); ok {
+					// currently ignoring whether the transaction has succeeded or not
+					// TODO AM: set up counter for failed submissions as reverted without error seems to be the problem
+					workerID, _ := strconv.Atoi(transaction.IdempotencyKey[11:16])
 					receivedEventsCounter.Inc()
-
-					workerID, err := pr.filterEvent(*thisEvent, wsconn.URL())
-					if err != nil {
-						return err
+					if !*transaction.Public[0].Success {
+						failedTransactionsCounter.Inc()
 					}
-
+					lastCompletedTime = transaction.Public[0].CompletedAt
+					if !pr.stopping && workerID >= 0 {
+						preFixedWorkerID := fmt.Sprintf("%s%d", pr.eventPrefixForCurrentStage, workerID)
+						pr.completedTransactions[preFixedWorkerID] <- nodeURL
+					}
 					pr.recordCompletedAction()
-					// Release worker so it can continue to its next task
-					if (!pr.stopping && !pr.cfg.NoWaitSubmission && !pr.cfg.SkipMintConfirmations) || pr.eventPrefixForCurrentStage == preparePrefix {
-						if workerID >= 0 {
-							preFixedWorkerID := fmt.Sprintf("%s%d", pr.eventPrefixForCurrentStage, workerID)
-							// No need for locking as channel have built in support
-							pr.wsReceivers[preFixedWorkerID] <- nodeURL
-						}
-					}
-					return nil
-				})
-			}
-
-			// Wait for all go routines to complete
-			// The first non-nil go routine will be returned
-			// and we will return the error
-			log.Debug("Waiting for events from websocket to be handled")
-			if err := g.Wait(); err != nil {
-				return err
-			}
-			log.Debug("All events from websocket handled")
-
-			// We have completed all the go routines
-			// and can ack the batch
-			// Ack batch event
-			ack := &core.WSAck{
-				WSActionBase: core.WSActionBase{
-					Type: core.WSClientActionAck,
-				},
-				ID: batch.ID,
-				Subscription: &core.SubscriptionRef{
-					ID: batch.Subscription.ID,
-				},
-			}
-			ackJSON, _ := json.Marshal(ack)
-			wsconn.Send(context.Background(), ackJSON)
-
-			pr.summary.mutex.Lock()
-			pr.calculateCurrentTps(true)
-			pr.summary.mutex.Unlock()
-		case <-pr.ctx.Done():
-			log.Warnf("Run loop exiting (context cancelled)")
-			wsconn.Close()
-			return
-		}
-	}
-}
-
-func (pr *perfRunner) eventLoop(nodeURL string, wsconn wsclient.WSClient) (err error) {
-	log.Infof("Event loop started for %s...", nodeURL)
-	for {
-		log.Trace("blocking until wsconn.Receive or ctx.Done()")
-		select {
-		// Wait to receive websocket event
-		case msgBytes, ok := <-wsconn.Receive():
-			if !ok {
-				log.Errorf("Error receiving websocket")
-				return
-			}
-			log.Trace("received from websocket")
-
-			receivedEventsCounter.Inc()
-
-			// Handle websocket event
-			var event core.EventDelivery
-			json.Unmarshal(msgBytes, &event)
-
-			if pr.cfg.LogEvents {
-				fmt.Println("Event: ", string(msgBytes))
-			}
-
-			workerID, err := pr.filterEvent(event, wsconn.URL())
-			if err != nil {
-				return err
-			}
-
-			// Ack websocket event
-			ack := &core.WSAck{
-				WSActionBase: core.WSActionBase{
-					Type: core.WSClientActionAck,
-				},
-				ID: event.ID,
-				Subscription: &core.SubscriptionRef{
-					ID: event.Subscription.ID,
-				},
-			}
-			ackJSON, _ := json.Marshal(ack)
-			wsconn.Send(context.Background(), ackJSON)
-			pr.recordCompletedAction()
-			// Release worker so it can continue to its next task
-			if (!pr.stopping && !pr.cfg.NoWaitSubmission && !pr.cfg.SkipMintConfirmations) || pr.eventPrefixForCurrentStage == preparePrefix {
-				if workerID >= 0 {
-					preFixedWorkerID := fmt.Sprintf("%s%d", pr.eventPrefixForCurrentStage, workerID)
-					pr.wsReceivers[preFixedWorkerID] <- nodeURL
+					pr.summary.mutex.Lock()
+					pr.calculateCurrentTps(true)
+					pr.summary.mutex.Unlock()
 				}
 			}
-			pr.summary.mutex.Lock()
-			pr.calculateCurrentTps(true)
-			pr.summary.mutex.Unlock()
 		case <-pr.ctx.Done():
 			log.Warnf("Run loop exiting (context cancelled)")
-			wsconn.Close()
+			ticker.Stop()
 			return
 		}
 	}
@@ -976,7 +564,6 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 			trackingIDs := make([]string, 0)
 
 			for actionsCompleted = 0; actionsCompleted < tc.ActionsPerLoop(); actionsCompleted++ {
-
 				if pr.allActionsComplete() {
 					break
 				}
@@ -1023,7 +610,7 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 				// before making itself available for the next job
 				confirmationsPerAction = 0
 			} else {
-				confirmationsPerAction = len(pr.nodeURLs)
+				confirmationsPerAction = len(pr.nodeURLs) // TODO AM: is this the right number when polling?
 				if testName == conf.PerfTestBlobPrivateMsg.String() || testName == conf.PerfTestPrivateMsg.String() {
 					confirmationsPerAction = 2
 				}
@@ -1037,7 +624,7 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 					select {
 					case <-pr.ctx.Done():
 						return nil
-					case <-pr.wsReceivers[preFixedWorkerID]:
+					case <-pr.completedTransactions[preFixedWorkerID]:
 						continue
 					}
 				}
@@ -1071,126 +658,13 @@ func (pr *perfRunner) runLoop(tc TestCase) error {
 			}
 			loop++
 
-			if testName == conf.PerfTestTokenMint.String() &&
-				pr.cfg.TokenOptions.MaxTokenBalanceWait.Seconds() > 0 &&
-				workerID == 0 && (loop%10 == 0) {
-				log.Infof("Worker 0 updating current mint balance")
-				// Worker 0 periodically updates the mint balance gauge
-				currentBalance, err := pr.getMintRecipientBalance()
-				if err != nil {
-					log.Warnf("Failed to check token balance: %v", err)
-				} else {
-					mintBalanceGauge.Set(float64(currentBalance) - float64(mintStartingBalance))
-				}
-			}
 		case <-pr.ctx.Done():
 			return nil
 		}
 	}
 }
 
-func (pr *perfRunner) createMsgConfirmSub(nodeURL, name, tag string) (subID string, subName string, err error) {
-	var sub core.Subscription
-	subPayload := core.Subscription{
-		SubscriptionRef: core.SubscriptionRef{
-			Name:      name,
-			Namespace: pr.cfg.FFNamespace,
-		},
-		Options: pr.constructSubscriptionsOptions(),
-		Filter: core.SubscriptionFilter{
-			Events: core.EventTypeMessageConfirmed.String(),
-			Message: core.MessageFilter{
-				Tag: tag,
-			},
-		},
-		Transport: TRANSPORT_TYPE,
-	}
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "subscriptions")
-	if err != nil {
-		return "", "", err
-	}
-	_, err = pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(subPayload).
-		SetResult(&sub).
-		Post(fullPath)
-	if err != nil {
-		log.Errorf("Could not create subscription: %s", err)
-		return "", "", err
-	}
-
-	log.Infof("Created subscription on %s: %s", nodeURL, pr.tagPrefix)
-
-	pr.subscriptionIDsForNodes[nodeURL] = append(pr.subscriptionIDsForNodes[nodeURL], sub.ID.String())
-	return sub.ID.String(), sub.Name, nil
-}
-
-func (pr *perfRunner) openWsClient(wsconn wsclient.WSClient) (err error) {
-	if err := wsconn.Connect(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (pr *perfRunner) startSubscriptions(ctx context.Context, wsconn wsclient.WSClient) (err error) {
-	for _, nextSub := range pr.subscriptionMap {
-		if strings.HasPrefix(nextSub.Name, "mint_") {
-			if err := pr.startSubscription(wsconn, fmt.Sprintf("mint_%s", pr.tagPrefix)); err != nil {
-				return err
-			}
-		} else if strings.HasPrefix(nextSub.Name, "blob_") {
-			if err := pr.startSubscription(wsconn, fmt.Sprintf("blob_%s", pr.tagPrefix)); err != nil {
-				return err
-			}
-		} else if strings.HasPrefix(nextSub.Name, "contracts_") {
-			if err := pr.startSubscription(wsconn, fmt.Sprintf("contracts_%s", pr.tagPrefix)); err != nil {
-				return err
-			}
-		} else if strings.HasPrefix(nextSub.Name, pr.tagPrefix) {
-			if err := pr.startSubscription(wsconn, pr.tagPrefix); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-func (pr *perfRunner) startSubscription(wsconn wsclient.WSClient, name string) (err error) {
-	log.Infof("Starting subscription %s", name)
-	var autoack = false
-	startPayload := core.WSStart{
-		WSActionBase: core.WSActionBase{
-			Type: core.WSClientActionStart,
-		},
-		AutoAck:   &autoack,
-		Name:      name,
-		Namespace: pr.cfg.FFNamespace,
-	}
-	start, _ := json.Marshal(startPayload)
-	err = wsconn.Send(pr.ctx, start)
-	if err != nil {
-		log.Errorf("Issue opening websocket client: %s", err)
-		return err
-	}
-	log.Infof(`Receiving Events subscription: "%s"`, name)
-	return nil
-}
-
-func containsTargetTest(tests []conf.TestCaseConfig, target fftypes.FFEnum) bool {
-	for _, test := range tests {
-		if test.Name == target {
-			return true
-		}
-	}
-
-	return false
-}
-
-func getFFClient(node string) *resty.Client {
+func getPaladinClient(node string) *resty.Client {
 	client := resty.New()
 	client.SetBaseURL(node)
 	client.SetTLSClientConfig(&tls.Config{InsecureSkipVerify: true})
@@ -1207,6 +681,11 @@ func (pr *perfRunner) detectDelinquentMsgs() bool {
 		}
 		return true
 	})
+	incompleteTransactions := 0
+	pr.txIDMap.Range(func(k, v interface{}) bool {
+		incompleteTransactions++
+		return true
+	})
 
 	dw, err := json.MarshalIndent(delinquentMsgs, "", "  ")
 	if err != nil {
@@ -1218,49 +697,67 @@ func (pr *perfRunner) detectDelinquentMsgs() bool {
 		log.Warnf("Delinquent Messages:\n%s", string(dw))
 	}
 
+	if incompleteTransactions > 0 {
+		log.Warnf("Incomplete transactions:\n%d", incompleteTransactions)
+	}
+
 	return len(delinquentMsgs) > 0
 }
 
-// A minting test configured to check the balance of the mint recipient address
-// Since this could take some time after all mint requests have been submitted we allow until
-// the end of the test duration for the balance to reach the expected value.
-// Function returns true if the expected balance isn't correct, otherwise false
-func (pr *perfRunner) detectDelinquentBalance() bool {
-
-	if containsTargetTest(pr.cfg.Tests, conf.PerfTestTokenMint) && pr.cfg.TokenOptions.MaxTokenBalanceWait.Seconds() > 0 {
-		balanceEndTime := time.Now().Unix() + int64(pr.cfg.TokenOptions.MaxTokenBalanceWait.Seconds())
-		// var currentBalance int
-		fmt.Printf("Waiting for up to %v for the balance of %s to reach the expected value\n", pr.cfg.TokenOptions.MaxTokenBalanceWait, pr.cfg.RecipientAddress)
-	balanceCheckLoop:
-		for time.Now().Unix() < balanceEndTime {
-
-			timeout := time.After(10 * time.Second)
-			select {
-			case <-pr.ctx.Done():
-				return true
-			case <-timeout:
-				currentBalance, err := pr.getMintRecipientBalance()
-				mintBalanceGauge.Set(float64(currentBalance) - float64(mintStartingBalance))
-
-				if err != nil {
-					log.Errorf("Failed to query token balance: %v\n", err)
-				} else {
-					if getMetricVal(sentMintsCounter) == getMetricVal(mintBalanceGauge) {
-						log.Infof("Balance reached\n")
-						break balanceCheckLoop
+func (pr *perfRunner) findLostTransactions(nodeURL string) {
+	ticker := time.NewTicker(5 * time.Second)
+	client := getPaladinClient(nodeURL)
+	for {
+		select {
+		case <-ticker.C:
+			pr.txIDMap.Range(func(k, v interface{}) bool {
+				transactionID := k.(string)
+				submittedTime := v.(time.Time)
+				if time.Now().After(submittedTime.Add(5 * time.Second)) {
+					payload := fmt.Sprintf(`{
+						"jsonrpc": "2.0",
+						"id": "1",
+						"method": "ptx_getTransactionFull",
+						"params": ["%s"]
+					}`, transactionID)
+					var response getTransactionResponse
+					var resError string
+					res, err := client.R().
+						SetHeaders(map[string]string{
+							"Accept":       "application/json",
+							"Content-Type": "application/json",
+						}).
+						SetBody([]byte(payload)).
+						SetResult(&response).
+						SetError(resError).
+						Post("/")
+					if err != nil || res.IsError() {
+						log.Errorf("Error getting transaction")
+					}
+					transaction := response.Result
+					if len(transaction.Public) > 0 && transaction.Public[0].Success != nil {
+						log.Debugf("Found lost transaction id %s", transactionID)
+						workerID, _ := strconv.Atoi(transaction.IdempotencyKey[11:16])
+						receivedEventsCounter.Inc()
+						if !*transaction.Public[0].Success {
+							failedTransactionsCounter.Inc()
+						}
+						if !pr.stopping && workerID >= 0 {
+							preFixedWorkerID := fmt.Sprintf("%s%d", pr.eventPrefixForCurrentStage, workerID)
+							pr.completedTransactions[preFixedWorkerID] <- nodeURL
+						}
+						pr.txIDMap.Delete(transactionID)
+						pr.recordCompletedAction()
+						pr.summary.mutex.Lock()
+						pr.calculateCurrentTps(true)
+						pr.summary.mutex.Unlock()
 					}
 				}
-			}
+				return true
+			})
+		case <-pr.ctx.Done():
+			return
 		}
-
-		if getMetricVal(sentMintsCounter) != getMetricVal(mintBalanceGauge) {
-			log.Errorf("Token mint recipient balance didn't reach the expected value in the allowed time\n")
-			return true
-		} else {
-			return false
-		}
-	} else {
-		return false
 	}
 }
 
@@ -1287,424 +784,6 @@ func (pr *perfRunner) recordCompletedAction() {
 func (pr *perfRunner) stopTrackingRequest(trackingID string) {
 	log.Debugf("Deleting tracking request: %s", trackingID)
 	pr.msgTimeMap.Delete(trackingID)
-}
-
-func (pr *perfRunner) premintERC20Tokens(nodeURL string, contractAddress string, signingKeyAddress string, amount int) error {
-	log.Infof("Preparing minting request of %d tokens for address %s of ERC20 contract at %s", amount, signingKeyAddress, contractAddress)
-
-	idempotencyKey := fftypes.NewUUID().String()
-	invokeOptionsJSON := ""
-	payload := fmt.Sprintf(`{
-		"location": {
-			"address": "%s"
-		},
-		"method": {
-			"name": "mint",
-			"params": [
-				{
-					"name": "to",
-					"schema": {
-						"type": "string",
-						"details": {
-							"type": "address"
-						}
-					}
-				},
-				{
-					"name": "amount",
-					"schema": {
-						"type": "integer",
-						"details": {
-							"type": "uint256"
-						}
-					}
-				}
-			],
-			"returns": []
-		},
-		"input": {
-			"to": "%s",
-			"amount": %d
-		},
-		"key": "%s",
-		"idempotencyKey": "%s"%s
-	}`, contractAddress, signingKeyAddress, amount, signingKeyAddress, idempotencyKey, invokeOptionsJSON)
-
-	var errResponse fftypes.RESTError
-	var responseBody map[string]interface{}
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "contracts/invoke")
-	if err != nil {
-		return err
-	}
-	res, err := pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(payload).
-		SetResult(&responseBody).
-		SetError(&errResponse).
-		Post(fullPath)
-	if err != nil {
-		return err
-	}
-	if res.IsError() {
-		return fmt.Errorf("failed: %s", errResponse)
-	}
-	id := responseBody["id"].(string)
-	log.Infof("Submitted minting request of %d tokens for address %s of ERC20 contract at %s, firefly request id: %s", amount, signingKeyAddress, contractAddress, id)
-	return nil
-}
-
-func (pr *perfRunner) createERC20ContractListener(nodeURL string) (string, error) {
-	subPayload := fmt.Sprintf(`{
-		"location": {
-			"address": "%s"
-		},
-		"event": {
-			"name": "Transfer",
-			"description": "",
-			"params": [
-				{
-					"name": "from",
-					"schema": {
-						"type": "string",
-						"details": {
-							"type": "address",
-							"internalType": "address",
-							"indexed": true
-						},
-						"description": "A hex encoded set of bytes, with an optional '0x' prefix"
-					}
-				},
-				{
-					"name": "to",
-					"schema": {
-						"type": "string",
-						"details": {
-							"type": "address",
-							"internalType": "address",
-							"indexed": true
-						},
-						"description": "A hex encoded set of bytes, with an optional '0x' prefix"
-					}
-				},
-				{
-					"name": "value",
-					"schema": {
-						"oneOf": [
-							{
-								"type": "string"
-							},
-							{
-								"type": "integer"
-							}
-						],
-						"details": {
-							"type": "uint256",
-							"internalType": "uint256"
-						},
-						"description": "An integer. You are recommended to use a JSON string. A JSON number can be used for values up to the safe maximum."
-					}
-				}
-			]
-		},
-		"topic": "%s"
-	}`, pr.cfg.ContractOptions.Address, fftypes.NewUUID())
-
-	var errResponse fftypes.RESTError
-	var responseBody map[string]interface{}
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "contracts/listeners")
-	if err != nil {
-		return "", err
-	}
-	res, err := pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(subPayload).
-		SetResult(&responseBody).
-		SetError(&errResponse).
-		Post(fullPath)
-	if err != nil {
-		return "", err
-	}
-	if res.IsError() {
-		return "", fmt.Errorf("failed: %s", errResponse)
-	}
-	id := responseBody["id"].(string)
-	log.Infof("Created contract listener on %s: %s", nodeURL, id)
-	pr.listenerIDsForNodes[nodeURL] = append(pr.listenerIDsForNodes[nodeURL], id)
-
-	return id, nil
-}
-
-func (pr *perfRunner) createEthereumContractListener(nodeURL string) (string, error) {
-	subPayload := fmt.Sprintf(`{
-		"location": {
-			"address": "%s"
-		},
-		"event": {
-			"name": "Changed",
-			"description": "",
-			"params": [
-				{
-					"name": "from",
-					"schema": {
-						"type": "string",
-						"details": {
-							"type": "address",
-							"internalType": "address",
-							"indexed": true
-						}
-					}
-				},
-				{
-					"name": "value",
-					"schema": {
-						"type": "integer",
-						"details": {
-							"type": "uint256",
-							"internalType": "uint256"
-						}
-					}
-				}
-			]
-		},
-		"topic": "%s"
-	}`, pr.cfg.ContractOptions.Address, fftypes.NewUUID())
-
-	var errResponse fftypes.RESTError
-	var responseBody map[string]interface{}
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "contracts/listeners")
-	if err != nil {
-		return "", err
-	}
-	res, err := pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(subPayload).
-		SetResult(&responseBody).
-		SetError(&errResponse).
-		Post(fullPath)
-	if err != nil {
-		return "", err
-	}
-	if res.IsError() {
-		return "", fmt.Errorf("failed: %s", errResponse)
-	}
-	id := responseBody["id"].(string)
-	log.Infof("Created contract listener on %s: %s", nodeURL, id)
-	pr.listenerIDsForNodes[nodeURL] = append(pr.listenerIDsForNodes[nodeURL], id)
-
-	return id, nil
-}
-
-func (pr *perfRunner) createFabricContractListener(nodeURL string) (string, error) {
-	subPayload := fmt.Sprintf(`{
-		"location": {
-			"channel": "%s",
-			"chaincode": "%s"
-		},
-		"event": {
-			"name": "AssetCreated"
-		},
-		"topic": "%s"
-	}`, pr.cfg.ContractOptions.Channel, pr.cfg.ContractOptions.Chaincode, fftypes.NewUUID())
-
-	var errResponse fftypes.RESTError
-	var responseBody map[string]interface{}
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "contracts/listeners")
-	if err != nil {
-		return "", err
-	}
-	res, err := pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(subPayload).
-		SetResult(&responseBody).
-		SetError(&errResponse).
-		Post(fullPath)
-	if err != nil {
-		return "", err
-	}
-	err = json.Unmarshal(res.Body(), &responseBody)
-	if err != nil {
-		return "", err
-	}
-	if res.IsError() {
-		return "", fmt.Errorf("failed: %s", errResponse)
-	}
-	id := responseBody["id"].(string)
-	log.Infof("Created contract listener on %s: %s", nodeURL, id)
-	pr.listenerIDsForNodes[nodeURL] = append(pr.listenerIDsForNodes[nodeURL], id)
-
-	return id, nil
-}
-
-func (pr *perfRunner) deleteSubscription(nodeURL string, subscriptionID string) error {
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "subscriptions", subscriptionID)
-	if err != nil {
-		return err
-	}
-	_, err = pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept": "application/json",
-		}).
-		Delete(fullPath)
-	return err
-}
-
-func (pr *perfRunner) deleteContractListener(nodeURL string, listenerID string) error {
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "contracts/listeners", listenerID)
-	_, err = pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept": "application/json",
-		}).
-		Delete(fullPath)
-	return err
-}
-
-func (pr *perfRunner) createContractsSub(nodeURL, listenerID string) (subID string, subName string, err error) {
-	log.Infof("Creating contract subscription %s: %s", nodeURL, fmt.Sprintf("contracts_%s", pr.tagPrefix))
-	var sub core.Subscription
-	subPayload := core.Subscription{
-		SubscriptionRef: core.SubscriptionRef{
-			Name:      fmt.Sprintf("contracts_%s", pr.tagPrefix),
-			Namespace: pr.cfg.FFNamespace,
-		},
-		Filter: core.SubscriptionFilter{
-			Events: core.EventTypeBlockchainEventReceived.String(),
-			BlockchainEvent: core.BlockchainEventFilter{
-				Listener: listenerID,
-			},
-		},
-		Options:   pr.constructSubscriptionsOptions(),
-		Transport: TRANSPORT_TYPE,
-	}
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "subscriptions")
-	if err != nil {
-		return "", "", err
-	}
-	_, err = pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(subPayload).
-		SetResult(&sub).
-		Post(fullPath)
-	if err != nil {
-		log.Errorf("Could not create subscription on %s: %s", nodeURL, err)
-		return "", "", err
-	}
-
-	log.Infof("Created contracts subscription on %s: %s", nodeURL, fmt.Sprintf("contracts_%s", pr.tagPrefix))
-
-	pr.subscriptionIDsForNodes[nodeURL] = append(pr.subscriptionIDsForNodes[nodeURL], sub.ID.String())
-	return sub.ID.String(), sub.Name, nil
-}
-
-func (pr *perfRunner) constructSubscriptionsOptions() core.SubscriptionOptions {
-	readAhead := uint16(pr.totalWorkers)
-	firstEvent := core.SubOptsFirstEventNewest
-	// Default options
-	options := core.SubscriptionOptions{
-		SubscriptionCoreOptions: core.SubscriptionCoreOptions{
-			ReadAhead:  &readAhead,
-			FirstEvent: &firstEvent,
-		},
-	}
-	if pr.cfg.SubscriptionCoreOptions != nil {
-		options.SubscriptionCoreOptions = *pr.cfg.SubscriptionCoreOptions
-		if options.SubscriptionCoreOptions.ReadAhead == nil {
-			// ReadAhead not specified in config, so default
-			options.SubscriptionCoreOptions.ReadAhead = &readAhead
-		}
-		if options.SubscriptionCoreOptions.FirstEvent == nil {
-			// FirstEvent not specified in config, so default
-			options.SubscriptionCoreOptions.FirstEvent = &firstEvent
-		}
-	}
-
-	return options
-}
-
-func (pr *perfRunner) createTokenMintSub(nodeURL string) (subID string, subName string, err error) {
-	log.Infof("Creating token mint subscription %s: %s", nodeURL, fmt.Sprintf("mint_%s", pr.tagPrefix))
-	var sub core.Subscription
-	subPayload := core.Subscription{
-		SubscriptionRef: core.SubscriptionRef{
-			Name:      fmt.Sprintf("mint_%s", pr.tagPrefix),
-			Namespace: pr.cfg.FFNamespace,
-		},
-		Options: pr.constructSubscriptionsOptions(),
-		Filter: core.SubscriptionFilter{
-			Events: core.EventTypeTransferConfirmed.String(),
-		},
-		Transport: TRANSPORT_TYPE,
-	}
-
-	fullPath, err := url.JoinPath(nodeURL, pr.cfg.FFNamespacePath, "subscriptions")
-	if err != nil {
-		return "", "", err
-	}
-	_, err = pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetBody(subPayload).
-		SetResult(&sub).
-		Post(fullPath)
-	if err != nil {
-		log.Errorf("Could not create subscription on %s: %s", nodeURL, err)
-		return "", "", err
-	}
-
-	log.Infof("Created minted tokens subscription on %s: %s", nodeURL, fmt.Sprintf("mint_%s", pr.tagPrefix))
-
-	pr.subscriptionIDsForNodes[nodeURL] = append(pr.subscriptionIDsForNodes[nodeURL], sub.ID.String())
-	return sub.ID.String(), sub.Name, nil
-}
-
-type PaginatedResponse struct {
-	Total int `ffstruct:"PaginatedResponse" json:"total,omitempty"`
-}
-
-func (pr *perfRunner) getMintRecipientBalance() (int, error) {
-	var payload string
-
-	var response PaginatedResponse
-	var resError fftypes.RESTError
-	fullPath, err := url.JoinPath(pr.client.BaseURL, pr.cfg.FFNamespacePath, "tokens/balances")
-	if err != nil {
-		return 0, nil
-	}
-	res, err := pr.client.R().
-		SetHeaders(map[string]string{
-			"Accept":       "application/json",
-			"Content-Type": "application/json",
-		}).
-		SetQueryParams(map[string]string{
-			"count": "true",
-			"limit": "1",
-			"key":   pr.cfg.TokenOptions.RecipientAddress,
-		}).
-		SetBody([]byte(payload)).
-		SetResult(&response).
-		SetError(&resError).
-		Get(fullPath)
-	if err != nil || res.IsError() {
-		return 0, fmt.Errorf("error querying token balance [%d]: %s (%+v)", resStatus(res), err, &resError)
-	}
-
-	return response.Total, nil
 }
 
 func (pr *perfRunner) IsDaemon() bool {
@@ -1740,8 +819,5 @@ func (pr *perfRunner) calculateCurrentTps(logValue bool) float64 {
 }
 
 func (pr *perfRunner) ramping() bool {
-	if time.Now().Before(time.Unix(pr.endRampTime, 0)) {
-		return true
-	}
-	return false
+	return time.Now().Before(time.Unix(pr.endRampTime, 0))
 }

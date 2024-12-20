@@ -1,0 +1,18 @@
+nodes:
+  - name: long-run-node
+    apiEndpoint: http://127.0.0.1:31548
+instances:
+  - name: test
+    manualNodeIndex: 0
+    tests:
+      - workers: 20
+        actionsPerLoop: 5
+    contractOptions:
+      address: '0x1bf817cef126ee504a48d42f427ab8391da17eaa'
+    maxTimePerAction: 60s
+    noWaitSubmission: false
+    delinquentAction: log
+    length: 1m
+    rampLength: 30s
+log:
+  level: trace    
